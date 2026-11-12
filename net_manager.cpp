@@ -16,6 +16,7 @@
 #include <esp_task_wdt.h>
 #include "hal_relays.h"
 #include "cloud_pairing.h"
+#include "ota_guard.h"
 #include "device_settings.h"
 #include "wifi_portal.h"
 #include "board_pins.h"
@@ -755,9 +756,10 @@ void handle_network() {
                 char ev[200];
                 if (!bootReported) {
                     bootReported = true;
-                    snprintf(ev, sizeof(ev), "{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u}",
+                    snprintf(ev, sizeof(ev), "{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u,\"otaTest\":%d,\"otaRolledBack\":%d}",
                              reset_reason_str(esp_reset_reason()), FW_VERSION, millis(),
-                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                             ota_guard_pending() ? 1 : 0, ota_guard_rolled_back_once() ? 1 : 0);
                 } else {
                     snprintf(ev, sizeof(ev), "{\"type\":\"mqtt_reconnect\",\"ms\":%lu,\"down\":%lu,\"attempts\":%d,\"state\":%d,\"rssi\":%d}",
                              millis() - tp, millis() - mqttDownSince, mqttAttempts, stBefore, (int)WiFi.RSSI());

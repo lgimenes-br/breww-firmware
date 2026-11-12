@@ -11,6 +11,7 @@
 #include "hal_profiles.h"
 #include "device_settings.h"
 #include "board_pins.h"
+#include "ota_guard.h"
 
 #include <Preferences.h>
 #include <esp_heap_caps.h>
@@ -19,6 +20,7 @@
 void setup() {
     Serial.begin(115200);
     Serial.println("\n--- Breww Controller V2.0 ---");
+    ota_guard_begin(); // versao nova em teste? (atualizacao segura pelo ar)
     
     pins_load();     // pinos da placa (padrao ou configurados no NVS) antes de sensores/reles
     settings_load(); // modo, alvo, PID e dados do chopp (device_settings.cpp)
@@ -46,6 +48,7 @@ extern unsigned long prof_ota, prof_cloud, prof_reconnect, prof_mqttloop, prof_t
 void loop() {
     unsigned long t0 = millis();
     handle_network();
+    ota_guard_loop(mqttClient.connected());
     settings_loop(); // grava alteracoes pendentes (debounce)
     unsigned long tNet = millis() - t0;
     unsigned long tSens = 0, tCtrl = 0, tUi = 0;
