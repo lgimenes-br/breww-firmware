@@ -33,11 +33,16 @@ jobs:
             fqbn: esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc
     name: ${{ matrix.board }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: breww_controller # pasta precisa ter o mesmo nome do .ino
 
-      - uses: arduino/setup-arduino-cli@v2
+      # arduino-cli direto (a action arduino/setup-arduino-cli ainda roda em Node 20)
+      - name: Instalar arduino-cli 1.5.1
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/v1.5.1/install.sh | BINDIR="$HOME/.local/bin" sh -s 1.5.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Core ESP32 e bibliotecas (versoes fixas)
         run: |
