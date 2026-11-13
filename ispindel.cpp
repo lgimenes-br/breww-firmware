@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Breww
 #include "ispindel.h"
-#include <Preferences.h>
+#include "platform.h"
 #include <time.h>
 
 float ispindelGravity = 0.0;
@@ -55,5 +55,5 @@ void handle_ispindel_data(float gravity, float temp, float battery) {
     p.putBytes("hist", ispindelHistory, sizeof(ispindelHistory));
     p.end();
     
-    Serial.printf("iSpindel Atualizado -> SG: %.3f | Temp: %.1fC | Bat: %.2fV\n", gravity, temp, battery);
+    Serial.printf_P(PSTR("iSpindel Atualizado -> SG: %.3f | Temp: %.1fC | Bat: %.2fV\n"), gravity, temp, battery);
 }

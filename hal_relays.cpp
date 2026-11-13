@@ -3,7 +3,7 @@
 #include "hal_relays.h"
 #include "board_pins.h"
 #include "hal_sensors.h"
-#include <Preferences.h>
+#include "platform.h"
 #include <AutoPID.h>
 
 unsigned long lastCompressorOffTime = 0;
@@ -36,7 +36,7 @@ void relays_set_inverted(bool heater, bool cooler) {
     // Reaplica o estado atual com a polaridade nova (desligado continua desligado)
     relay_write(g_pins.heater, isHeaterOn);
     relay_write(g_pins.cooler, isCoolerOn);
-    Serial.printf("[Reles] Polaridade: aquecer %s, resfriar %s\n",
+    Serial.printf_P(PSTR("[Reles] Polaridade: aquecer %s, resfriar %s\n"),
                   heaterInverted ? "invertido (ativo em baixo)" : "normal (ativo em alto)",
                   coolerInverted ? "invertido (ativo em baixo)" : "normal (ativo em alto)");
 }
@@ -67,7 +67,7 @@ void start_autotune() {
     isHeaterOn = true;
     relay_write(g_pins.cooler, false);
     isCoolerOn = false;
-    Serial.println("[AutoTune] Iniciado.");
+    Serial.println(F("[AutoTune] Iniciado."));
 }
 
 void process_autotune() {
@@ -83,7 +83,7 @@ void process_autotune() {
             isHeaterOn = false;
             tuneState = 2; // Espera esfriar
             autotuneMsg = "Aguardando inercia (Resfriando)";
-            Serial.println("[AutoTune] Cruzou pra cima. Cortando calor.");
+            Serial.println(F("[AutoTune] Cruzou pra cima. Cortando calor."));
         }
     } else if (tuneState == 2) { // Esfriando
         if (controlTemp <= currentSetpoint) {
@@ -102,7 +102,7 @@ void process_autotune() {
             minTemp = controlTemp;
             tuneCycles++;
             autotuneMsg = "Ciclo " + String(tuneCycles) + " concluido";
-            Serial.printf("[AutoTune] Ciclo %d concluido.\n", tuneCycles);
+            Serial.printf_P(PSTR("[AutoTune] Ciclo %d concluido.\n"), tuneCycles);
 
             if (tuneCycles >= 3) { // 3 ciclos sao suficientes
                 isAutoTuning = false;
@@ -131,10 +131,10 @@ void process_autotune() {
                     
                     myPID.setGains(pidKp, pidKi, pidKd);
                     autotuneMsg = "Sucesso! Kp/Ki/Kd salvos.";
-                    Serial.println("[AutoTune] Finalizado com sucesso.");
+                    Serial.println(F("[AutoTune] Finalizado com sucesso."));
                 } else {
                     autotuneMsg = "Falhou (Amplitude 0)";
-                    Serial.println("[AutoTune] Falhou.");
+                    Serial.println(F("[AutoTune] Falhou."));
                 }
             }
         }
@@ -142,7 +142,7 @@ void process_autotune() {
 }
 
 void init_relays() {
-    Serial.println("Inicializando modulo de Reles e PID...");
+    Serial.println(F("Inicializando modulo de Reles e PID..."));
     Preferences p;
     p.begin("breww", true);
     heaterInverted = p.getBool("rel_inv_h", RELAY_ACTIVE_LOW_DEFAULT);
@@ -156,7 +156,7 @@ void init_relays() {
     pinMode(g_pins.cooler, OUTPUT);
     relay_write(g_pins.heater, false);
     relay_write(g_pins.cooler, false);
-    Serial.printf("[Reles] aquecer %s, resfriar %s\n", heaterInverted ? "invertido" : "normal", coolerInverted ? "invertido" : "normal");
+    Serial.printf_P(PSTR("[Reles] aquecer %s, resfriar %s\n"), heaterInverted ? "invertido" : "normal", coolerInverted ? "invertido" : "normal");
     
     isHeaterOn = false;
     isCoolerOn = false;
@@ -202,10 +202,10 @@ void process_thermostat() {
             isHeaterOn = false;
             isCoolerOn = false;
             if (isAutoTuning) { isAutoTuning = false; autotuneMsg = "Cancelado: sem sensor"; }
-            if (!warned) { warned = true; Serial.println("[Seguranca] Sem leitura do sensor de controle: reles desligados ate o sensor responder."); }
+            if (!warned) { warned = true; Serial.println(F("[Seguranca] Sem leitura do sensor de controle: reles desligados ate o sensor responder.")); }
             return;
         }
-        if (warned) { warned = false; Serial.println("[Seguranca] Sensor de controle voltou: controle retomado."); }
+        if (warned) { warned = false; Serial.println(F("[Seguranca] Sensor de controle voltou: controle retomado.")); }
     }
 
     // MODO CHOPP (Kegerator)

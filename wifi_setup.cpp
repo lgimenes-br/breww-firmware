@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Breww
 #include "wifi_setup.h"
 #include "net_manager.h"
-#include <WiFi.h>
+#include "platform.h"
 
 static const unsigned long WIFI_SETUP_TIMEOUT_MS = 15000;
 static WifiSetupState state = WIFI_SETUP_IDLE;

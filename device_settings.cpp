@@ -4,7 +4,7 @@
 #include "globals.h"
 #include "hal_profiles.h"   // ramp_on_mode_change, request_dashboard_refresh
 #include "net_manager.h"    // mqtt_publish_telemetry
-#include <Preferences.h>
+#include "platform.h"
 #include <AutoPID.h>
 
 extern AutoPID myPID;      // hal_relays.cpp

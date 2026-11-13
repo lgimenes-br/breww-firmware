@@ -4,12 +4,15 @@
 #define CLOUD_PAIRING_H
 
 #include <Arduino.h>
+#include "platform.h"
 
 // ID do aparelho = MAC Wi-Fi STA sem ":" (mesmo ID dos topicos MQTT brewbrother/<ID>/...)
 String get_device_id();
 
 // Raizes ISRG (Let's Encrypt) para validar breww.live (HTTPS e MQTT/TLS)
 const char* cloud_root_cas();
+// Prepara um cliente TLS para breww.live:<porta> (certificado validado; no ESP8266 tambem o tamanho dos buffers)
+void cloud_tls_setup(WiFiClientSecure& c, uint16_t port);
 
 // Chamar no loop sempre que o Wi-Fi estiver conectado.
 // Anuncia o aparelho ao servidor (HTTPS) e entrega pedidos de vinculo para a tela.

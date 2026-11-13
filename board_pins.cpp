@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Breww
 #include "board_pins.h"
 #include "config.h"
-#include <Preferences.h>
+#include "platform.h"
 
 #ifndef PIN_I2C_SDA
 #define PIN_I2C_SDA -1
@@ -33,6 +33,12 @@ static bool pin_exists_and_free(int p, bool output, String& why) {
     if (p < 0 || p > 21 || (p > 10 && p < 18)) { why = (p > 10 && p < 18) ? "e da memoria flash" : "nao existe no ESP32-C3"; return false; }
     if (p == 18 || p == 19) { why = "e do USB"; return false; }
     (void)output;
+#elif defined(ESP8266)
+    if (p < 0 || p > 16) { why = "nao existe no ESP8266"; return false; }
+    if (p >= 6 && p <= 11) { why = "e da memoria flash"; return false; }
+    if (p == 1 || p == 3) { why = "e da serial (USB)"; return false; }
+    if (p == 16 && !output) { why = "nao tem pull-up interno"; return false; }
+    (void)output;
 #else // ESP32 classico
     if (p < 0 || p > 39 || p == 20 || p == 24 || (p >= 28 && p <= 31)) { why = "nao existe no ESP32"; return false; }
     if (p >= 6 && p <= 11) { why = "e da memoria flash"; return false; }
@@ -51,6 +57,8 @@ static bool is_strapping(int p) {
     return p == 0 || p == 3 || p == 45 || p == 46;
 #elif defined(CONFIG_IDF_TARGET_ESP32C3)
     return p == 2 || p == 8 || p == 9;
+#elif defined(ESP8266)
+    return p == 0 || p == 2 || p == 15 || p == 16; // 16 pulsa no reset (rele estalaria)
 #else
     return p == 0 || p == 2 || p == 5 || p == 12 || p == 15;
 #endif
@@ -121,7 +129,7 @@ void pins_load() {
     p.end();
     String err;
     if (pins_validate(saved, err)) g_pins = saved;
-    else Serial.printf("[Pinos] Configuracao salva invalida (%s): usando os pinos padrao da placa\n", err.c_str());
+    else Serial.printf_P(PSTR("[Pinos] Configuracao salva invalida (%s): usando os pinos padrao da placa\n"), err.c_str());
 }
 
 bool pins_save(const BoardPins& np, String& err) {
@@ -156,7 +164,7 @@ void pins_reset_defaults() {
 }
 
 void pins_to_json(char* out, size_t n) {
-    snprintf(out, n, "{\"ow\":%d,\"dht\":%d,\"h\":%d,\"c\":%d,\"sda\":%d,\"scl\":%d,\"bup\":%d,\"bdn\":%d,\"cfg\":%s}",
+    snprintf_P(out, n, PSTR("{\"ow\":%d,\"dht\":%d,\"h\":%d,\"c\":%d,\"sda\":%d,\"scl\":%d,\"bup\":%d,\"bdn\":%d,\"cfg\":%s}"),
              g_pins.oneWire, g_pins.dht, g_pins.heater, g_pins.cooler, g_pins.sda, g_pins.scl, g_pins.btnUp, g_pins.btnDown,
              pins_configurable() ? "true" : "false");
 }

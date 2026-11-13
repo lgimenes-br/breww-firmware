@@ -7,8 +7,7 @@
 #include "net_manager.h"
 #include "wifi_setup.h"
 #include "cloud_pairing.h"
-#include <WiFi.h>
-#include <WebServer.h>
+#include "platform.h"
 #include <DNSServer.h>
 #include <ArduinoJson.h>
 
@@ -121,7 +120,7 @@ static void handle_save() {
     if (!ssid.length() || ssid.length() > 32 || pass.length() > 64) { server.send(400, "text/plain", "dados invalidos"); return; }
     server.send(200, "application/json", "{\"ok\":true}");
     lastSsidTried = ssid;
-    Serial.printf("[Portal] Conectando em \"%s\"...\n", ssid.c_str());
+    Serial.printf_P(PSTR("[Portal] Conectando em \"%s\"...\n"), ssid.c_str());
     wifi_setup_connect_new(ssid, pass); // grava e conecta; rede nova que falha tem a senha apagada
 }
 
@@ -167,7 +166,7 @@ static void portal_open() {
     active = true;
     connectedSince = 0;
     lastSsidTried = "";
-    Serial.printf("[Portal] Rede \"%s\" aberta. Conecte o celular nela e abra http://%s\n",
+    Serial.printf_P(PSTR("[Portal] Rede \"%s\" aberta. Conecte o celular nela e abra http://%s\n"),
                   ssid.c_str(), WiFi.softAPIP().toString().c_str());
 }
 
@@ -176,7 +175,7 @@ static void portal_close() {
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_STA);
     active = false;
-    Serial.println("[Portal] Fechado (Wi-Fi conectado)");
+    Serial.println(F("[Portal] Fechado (Wi-Fi conectado)"));
 }
 
 void wifi_portal_loop() {

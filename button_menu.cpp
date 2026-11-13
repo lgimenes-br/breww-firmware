@@ -76,7 +76,7 @@ void menu_begin() {
     if (!enabled) return;
     pinMode(up.pin, INPUT_PULLUP);
     pinMode(down.pin, INPUT_PULLUP);
-    Serial.printf("[Menu] Botoes nos GPIO %d (subir) e %d (descer). Os dois juntos abrem o menu.\n", up.pin, down.pin);
+    Serial.printf_P(PSTR("[Menu] Botoes nos GPIO %d (subir) e %d (descer). Os dois juntos abrem o menu.\n"), up.pin, down.pin);
 }
 
 bool menu_active() { return enabled && state != IDLE; }
@@ -125,21 +125,21 @@ void menu_fill(SmallDisplayState& st) {
     switch (state) {
     case EDIT_TARGET:
         st.menuTitle = "Alvo";
-        snprintf(valueBuf, sizeof(valueBuf), "%.1f°C", targetDraft);
+        snprintf_P(valueBuf, sizeof(valueBuf), PSTR("%.1f°C"), targetDraft);
         st.menuValue = valueBuf;
         st.menuHint = "Grava em 3 s";
         break;
     case MENU:
         st.menuTitle = "Menu";
-        if (menuIndex == 2) snprintf(valueBuf, sizeof(valueBuf), "%s", !isRampActive ? "Perfil: -" : (isRampPaused ? "Retomar" : "Pausar"));
-        else snprintf(valueBuf, sizeof(valueBuf), "%s", MENU_ITEMS[menuIndex]);
+        if (menuIndex == 2) snprintf_P(valueBuf, sizeof(valueBuf), PSTR("%s"), !isRampActive ? "Perfil: -" : (isRampPaused ? "Retomar" : "Pausar"));
+        else snprintf_P(valueBuf, sizeof(valueBuf), PSTR("%s"), MENU_ITEMS[menuIndex]);
         st.menuValue = valueBuf;
         st.menuHint = "Os 2 juntos: escolher";
         break;
     case EDIT_MODE:
         st.menuTitle = "Modo";
         st.menuValue = MODE_NAMES[modeChoice];
-        snprintf(hintBuf, sizeof(hintBuf), "%s", modeChoice == currentMode ? "Atual" : "Os 2 juntos: confirmar");
+        snprintf_P(hintBuf, sizeof(hintBuf), PSTR("%s"), modeChoice == currentMode ? "Atual" : "Os 2 juntos: confirmar");
         st.menuHint = hintBuf;
         break;
     default: break;

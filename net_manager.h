@@ -4,12 +4,10 @@
 #define NET_MANAGER_H
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
+#include "platform.h"
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 extern PubSubClient mqttClient;
-#include <Preferences.h>
 #include "config.h"
 #include "globals.h"
 

@@ -84,7 +84,7 @@ void set_sensor_mapping(const String& macCtrl, const String& mac2) {
     currentTemp = 0.0;
     currentTemp2 = 0.0;
     mappingDirty = true;
-    Serial.printf("[Sensores] Mapeamento salvo -> Controle: %s | Sensor 2: %s\n",
+    Serial.printf_P(PSTR("[Sensores] Mapeamento salvo -> Controle: %s | Sensor 2: %s\n"),
                   sensorMacCtrl.length() ? sensorMacCtrl.c_str() : "(auto)",
                   sensorMac2.length() ? sensorMac2.c_str() : "(auto)");
 }
@@ -111,7 +111,7 @@ int scan_ds18b20(String macs[], float temps[], int maxCount) {
     cachedDeviceCount = -1; // forca refazer a cache de enderecos no proximo ciclo
     sensors.requestTemperatures();
     lastTempRequest = millis();
-    Serial.printf("[Sensores] Scan: %d DS18B20 encontrados\n", count);
+    Serial.printf_P(PSTR("[Sensores] Scan: %d DS18B20 encontrados\n"), count);
     return count;
 }
 
@@ -123,7 +123,7 @@ unsigned long lastDhtOkMs = 0;
 unsigned long dhtFailCount = 0;
 
 void init_sensors() {
-    Serial.println("Inicializando barramento de sensores 1-Wire...");
+    Serial.println(F("Inicializando barramento de sensores 1-Wire..."));
     oneWire.begin(g_pins.oneWire);
     pinMode(g_pins.oneWire, INPUT_PULLUP);
     sensors.begin();
@@ -159,7 +159,14 @@ static bool probe_ds18b20(int pin) {
     return found;
 }
 
+#if defined(ESP8266)
+#define PROBE_ENTER() noInterrupts()
+#define PROBE_EXIT() interrupts()
+#else
 static portMUX_TYPE probeMux = portMUX_INITIALIZER_UNLOCKED;
+#define PROBE_ENTER() portENTER_CRITICAL(&probeMux)
+#define PROBE_EXIT() portEXIT_CRITICAL(&probeMux)
+#endif
 
 // Duracao do nivel atual (us) ou -1 se passar do limite
 static int32_t level_for(int pin, int level, uint32_t limitUs) {
@@ -180,7 +187,7 @@ static bool probe_dht22(int pin) {
     delayMicroseconds(1100);
     pinMode(pin, INPUT_PULLUP); // fora da secao critica (como a biblioteca DHT)
     delayMicroseconds(55);
-    portENTER_CRITICAL(&probeMux);
+    PROBE_ENTER();
     if (level_for(pin, LOW, 200) < 0 || level_for(pin, HIGH, 200) < 0) ok = false; // resposta ~80/80 us
     for (int i = 0; ok && i < 40; i++) {
         int32_t lo = level_for(pin, LOW, 200);
@@ -188,7 +195,7 @@ static bool probe_dht22(int pin) {
         if (hi < 0) { ok = false; break; }
         d[i / 8] = (d[i / 8] << 1) | (hi > lo ? 1 : 0);
     }
-    portEXIT_CRITICAL(&probeMux);
+    PROBE_EXIT();
     pinMode(pin, INPUT);
     if (!ok || d[4] != (uint8_t)(d[0] + d[1] + d[2] + d[3])) return false;
     const int hum = (d[0] << 8) | d[1];
@@ -227,7 +234,7 @@ static void autodetect_sensors() {
     const int ow = g_pins.oneWire, dh = g_pins.dht;
     if (ow < 0 || dh < 0 || !needOw) return;
     if ((!dhtOk && probe_ds18b20(dh)) || (needDht && probe_dht22(ow))) {
-        Serial.printf("[Sensores] DS18B20 e DHT22 invertidos no conector: DS18B20 agora no GPIO %d, DHT22 no %d\n", dh, ow);
+        Serial.printf_P(PSTR("[Sensores] DS18B20 e DHT22 invertidos no conector: DS18B20 agora no GPIO %d, DHT22 no %d\n"), dh, ow);
         use_dht_pin(ow);
         use_onewire_pin(dh);
         pins_set_sensor_swap(g_pins.oneWire != PIN_ONE_WIRE_BUS);
@@ -239,14 +246,14 @@ static void autodetect_sensors() {
         if (!pins_sensor_candidate(p) || p == g_pins.oneWire) continue;
         if (p == g_pins.dht && dhtOk) continue;
         if (sensors.getDeviceCount() == 0 && probe_ds18b20(p)) {
-            Serial.printf("[Sensores] DS18B20 encontrado no GPIO %d (antes: %d)\n", p, g_pins.oneWire);
+            Serial.printf_P(PSTR("[Sensores] DS18B20 encontrado no GPIO %d (antes: %d)\n"), p, g_pins.oneWire);
             if (p == g_pins.dht) use_dht_pin(-1);
             use_onewire_pin(p);
             changed = true;
             continue;
         }
         if (needDht && probe_dht22(p)) {
-            Serial.printf("[Sensores] DHT22 encontrado no GPIO %d (antes: %d)\n", p, g_pins.dht);
+            Serial.printf_P(PSTR("[Sensores] DHT22 encontrado no GPIO %d (antes: %d)\n"), p, g_pins.dht);
             use_dht_pin(p);
             changed = true;
             needDht = false; // um DHT basta
@@ -254,7 +261,7 @@ static void autodetect_sensors() {
     }
     if (changed) {
         String err;
-        if (!pins_save(g_pins, err)) Serial.printf("[Sensores] Nao gravou os pinos achados: %s\n", err.c_str());
+        if (!pins_save(g_pins, err)) Serial.printf_P(PSTR("[Sensores] Nao gravou os pinos achados: %s\n"), err.c_str());
     }
 #endif
 }
@@ -317,7 +324,7 @@ void read_temperatures() {
         // Print serial a cada 5 segs para n flodar
         static unsigned long lastPrint = 0;
         if(millis() - lastPrint > 5000) {
-            Serial.printf("[Sensores] DS18B20 (Cache ativos): %d\n", deviceCount);
+            Serial.printf_P(PSTR("[Sensores] DS18B20 (Cache ativos): %d\n"), deviceCount);
             lastPrint = millis();
         }
         
@@ -347,9 +354,9 @@ void read_temperatures() {
         static unsigned long lastDhtPrint = 0;
         if (millis() - lastDhtPrint > 5000) {
             if (dhtFailCount == 0) {
-                Serial.printf("[DHT22] OK %.1f%% / %.1fC (pino %d)\n", h, t, g_pins.dht);
+                Serial.printf_P(PSTR("[DHT22] OK %.1f%% / %.1fC (pino %d)\n"), h, t, g_pins.dht);
             } else {
-                Serial.printf("[DHT22] FALHA: %lu leituras seguidas sem resposta (pino %d). Verifique fiacao DATA, 3.3V/5V, GND e pull-up 10k.\n",
+                Serial.printf_P(PSTR("[DHT22] FALHA: %lu leituras seguidas sem resposta (pino %d). Verifique fiacao DATA, 3.3V/5V, GND e pull-up 10k.\n"),
                               dhtFailCount, g_pins.dht);
             }
             lastDhtPrint = millis();

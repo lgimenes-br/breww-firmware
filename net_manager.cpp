@@ -6,14 +6,13 @@
 #include "net_manager.h"
 #include "ui.h"
 
-#include <ESPmDNS.h>
-#include "ispindel.h"
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
-#include <HTTPClient.h>
+#include "platform.h"
+#if !BREWW_LITE
+#include <ArduinoOTA.h> // atualizacao pela IDE na rede local (fora da Lite: RAM)
+#endif
+#if !defined(ESP8266)
 #include <Update.h>
-#include <WiFiClientSecure.h>
-#include <esp_task_wdt.h>
+#endif
 #include "hal_relays.h"
 #include "cloud_pairing.h"
 #include "ota_guard.h"
@@ -25,8 +24,6 @@
 #include "small_display.h"
 #endif
 #include "version.h"
-#include <esp_system.h>
-#include <esp_heap_caps.h>
 
 WiFiClientSecure espClientTls; // MQTT com TLS (padrao)
 PubSubClient mqttClient(espClientTls);
@@ -76,12 +73,12 @@ static void publish_ota_status(const char* stage, int progress, int attempt = 0,
 static bool otaVerifyingSent = false;
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    Serial.printf("Mensagem recebida [%s]\n", topic);
+    Serial.printf_P(PSTR("Mensagem recebida [%s]\n"), topic);
     
-    char debug_payload[length + 1];
-    memcpy(debug_payload, payload, length);
-    debug_payload[length] = '\0';
-    Serial.printf("Payload: %s\n", debug_payload);
+    // Sem copia na pilha (no ESP8266 ela tem 4 KB e o payload chega a 2 KB)
+    Serial.print(F("Payload: "));
+    Serial.write(payload, length > 400 ? 400 : length);
+    Serial.println(length > 400 ? "..." : "");
 
     // Ignora comandos destinados a OUTROS aparelhos (a assinatura "brewbrother/+/command"
     // entrega comandos de todos os dispositivos do broker)
@@ -96,7 +93,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         myMac.replace(":", "");
         myMac.toUpperCase();
         if (target.length() && target != myMac && target != "GLOBAL") {
-            Serial.printf("Comando para outro aparelho (%s), ignorado.\n", target.c_str());
+            Serial.printf_P(PSTR("Comando para outro aparelho (%s), ignorado.\n"), target.c_str());
             return;
         }
     }
@@ -115,11 +112,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (!cmd) {
         cmd = doc["type"]; // Fallback just in case
         if (!cmd) {
-            Serial.println("Missing 'cmd' or 'type' in JSON");
+            Serial.println(F("Missing 'cmd' or 'type' in JSON"));
             return;
         }
     }
-    Serial.printf("Comando recebido: %s\n", cmd);
+    Serial.printf_P(PSTR("Comando recebido: %s\n"), cmd);
     
     
     if (strcmp(cmd, "update_firmware") == 0) {
@@ -135,19 +132,24 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 #endif
             // Confirma ao site ANTES de qualquer outra coisa (o modal mostra na hora)
             publish_ota_status("received", 0);
-            Serial.printf("[OTA] Iniciando atualizacao: %s\n", url.c_str());
+            Serial.printf_P(PSTR("[OTA] Iniciando atualizacao: %s\n"), url.c_str());
             isUpdatingOTA = true;
             override_relays(false, false);
             ui_show_ota_screen();
             cloud_pause_background(true); // nada de HTTPS de fundo disputando memoria/rede
+#if defined(ESP8266)
+            // RAM para uma conexao TLS so: o MQTT sai durante o download (o site deixa de ver o progresso)
+            publish_ota_status("downloading", 1);
+            mqttClient.disconnect();
+#endif
             const int MAX_TENTATIVAS = 3;
             bool ok = false;
             String lastError;
             for (int tentativa = 1; tentativa <= MAX_TENTATIVAS && !ok; tentativa++) {
                 if (tentativa > 1) {
                     char msg[64];
-                    snprintf(msg, sizeof(msg), "Falha na conexao. Tentativa %d de %d...", tentativa, MAX_TENTATIVAS);
-                    Serial.printf("[OTA] %s\n", msg);
+                    snprintf_P(msg, sizeof(msg), PSTR("Falha na conexao. Tentativa %d de %d..."), tentativa, MAX_TENTATIVAS);
+                    Serial.printf_P(PSTR("[OTA] %s\n"), msg);
                     ui_ota_status(msg);
                     publish_ota_status("retry", 0, tentativa, lastError.c_str());
                     delay(3000);
@@ -173,7 +175,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             cloud_pause_background(false);
             isUpdatingOTA = false;
             if (ok) {
-                Serial.println("[OTA] Reiniciando...");
+                Serial.println(F("[OTA] Reiniciando..."));
                 delay(1500);
                 ESP.restart();
             }
@@ -187,7 +189,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             unsigned long t0 = millis();
             settings_set_mode(doc["value"].as<int>()); // confirma na nuvem e grava
             request_dashboard_refresh = true; // tela do novo modo e montada no proximo ciclo do loop
-            Serial.printf("[CMD] setMode %d em %lu ms\n", currentMode, millis() - t0);
+            Serial.printf_P(PSTR("[CMD] setMode %d em %lu ms\n"), currentMode, millis() - t0);
         }
     }
     // ---- Perfil de fermentacao (app/site/servidor) ----
@@ -254,10 +256,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             if (isnan(temps[i])) o["temp"] = nullptr;
             else o["temp"] = roundf(temps[i] * 100.0f) / 100.0f;
         }
-        char out[768];
+        static char out[768]; // fora da pilha (ESP8266: 4 KB)
         serializeJson(resp, out, sizeof(out));
         mqttClient.publish(("brewbrother/" + mac + "/response").c_str(), out, false);
-        Serial.printf("Scan publicado: %s\n", out);
+        Serial.printf_P(PSTR("Scan publicado: %s\n"), out);
     }
     else if (strcmp(cmd, "set_sensors") == 0) {
         String ctrl = doc["macSensorControle"] | "";
@@ -275,7 +277,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         BoardPins np = g_pins;
         if (doc["reset"] | false) {
             pins_reset_defaults();
-            Serial.println("[Pinos] Voltando aos pinos padrao da placa. Reiniciando...");
+            Serial.println(F("[Pinos] Voltando aos pinos padrao da placa. Reiniciando..."));
             override_relays(false, false); delay(500); ESP.restart();
         }
         if (doc.containsKey("ow")) np.oneWire = doc["ow"].as<int>();
@@ -288,12 +290,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         if (doc.containsKey("bdn")) np.btnDown = doc["bdn"].as<int>();
         String err;
         if (pins_save(np, err)) {
-            Serial.println("[Pinos] Pinos novos gravados. Reiniciando...");
+            Serial.println(F("[Pinos] Pinos novos gravados. Reiniciando..."));
             override_relays(false, false);
             delay(500);
             ESP.restart();
         }
-        Serial.printf("[Pinos] Recusado: %s\n", err.c_str());
+        Serial.printf_P(PSTR("[Pinos] Recusado: %s\n"), err.c_str());
         pins_set_last_error(err);
         extern unsigned long lastTelemetry;
         lastTelemetry = 0; // o app ve o erro (pinsErr) na proxima telemetria
@@ -337,25 +339,35 @@ boolean reconnectMqtt() {
 
     mqttClient.setClient(espClientTls);
     mqttClient.setServer(MQTT_SERVER, MQTT_TLS_PORT);
+#if defined(ESP8266)
+    cloud_tls_setup(espClientTls, MQTT_TLS_PORT); // hora atual para validar o certificado + buffers (MFLN)
+#endif
 
     // Credencial propria do aparelho: o servidor so a cria depois do pareamento confirmado.
     // Antes disso o aparelho nao entra no broker (o pedido de vinculo chega pelo anuncio HTTPS).
     String user, pass;
     if (!cloud_mqtt_credentials(user, pass)) return false;
+#if defined(ESP8266)
+    if (time(nullptr) < 1704067200) return false; // BearSSL valida a data do certificado: espera o NTP
+#endif
 
     if (mqttClient.connect(clientId.c_str(), user.c_str(), pass.c_str())) {
-        Serial.println("MQTT Conectado! (credencial propria, TLS 8883)");
+        Serial.println(F("MQTT Conectado! (credencial propria, TLS 8883)"));
         // So o proprio topico de comandos. O backend publica cada comando em /command E em
         // /comando (compatibilidade); assinar os dois executava tudo duas vezes (tela
         // reconstruida e flash gravada em dobro a cada troca de modo).
         mqttClient.subscribe(("brewbrother/" + mac + "/command").c_str());
     } else {
         int st = mqttClient.state();
-        Serial.printf("MQTT falhou (state %d, TLS 8883)\n", st);
+        Serial.printf_P(PSTR("MQTT falhou (state %d, TLS 8883)\n"), st);
         if (st == MQTT_CONNECT_FAILED) {
             char tlsErr[100] = {0};
+#if defined(ESP8266)
+            espClientTls.getLastSSLError(tlsErr, sizeof(tlsErr));
+#else
             espClientTls.lastError(tlsErr, sizeof(tlsErr));
-            Serial.printf("[MQTT] TLS: %s\n", tlsErr);
+#endif
+            Serial.printf_P(PSTR("[MQTT] TLS: %s\n"), tlsErr);
         }
         // 4 = usuario/senha invalidos, 5 = nao autorizado
         if ((st == MQTT_CONNECT_BAD_CREDENTIALS || st == MQTT_CONNECT_UNAUTHORIZED)) {
@@ -392,13 +404,15 @@ void clear_wifi_credentials() {
 }
 
 void attempt_wifi_connection(String ssid, String pass) {
-    Serial.printf("Tentando conectar a: %s\n", ssid.c_str());
+    Serial.printf_P(PSTR("Tentando conectar a: %s\n"), ssid.c_str());
     WiFi.disconnect();
-    WiFi.setSleep(false); // Evita que o modem WiFi hiberne e cause lag no MQTT
+    plat_wifi_no_sleep(); // Evita que o modem WiFi hiberne e cause lag no MQTT
+#if !defined(ESP8266)
     // Rede mesh: o padrao (WIFI_FAST_SCAN) conecta no PRIMEIRO no encontrado, mesmo distante.
     // Varre todos os canais e escolhe o no com melhor sinal.
     WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+#endif
     WiFi.begin(ssid.c_str(), pass.c_str());
 }
 
@@ -428,6 +442,7 @@ String get_scanned_ssid(int i) {
 
 
 
+#if !BREWW_LITE
 // ---- Pagina local /update: Basic Auth com usuario "breww" e o codigo de confirmacao ----
 static bool uploadAuthorized = false;
 
@@ -440,25 +455,28 @@ static bool local_update_authorized() {
 static void request_local_auth() {
     server.requestAuthentication(BASIC_AUTH, "Breww", "Use o usuario breww e o codigo de confirmacao da tela do aparelho");
 }
+#endif
 
 void handleRoot() {
 #if !BREWW_HAS_LVGL
     if (wifi_portal_active()) { wifi_portal_handle_root(); return; } // configuracao do Wi-Fi
 #endif
     String html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Breww Controller</title>";
-    html += "<style>body{background-color:#0a0a0a;color:#ffffff;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;text-align:center;padding:10vh 20px;margin:0;}";
-    html += "h1{color:#f59e0b;font-size:2.5rem;margin-bottom:10px;}";
-    html += "p{color:#cccccc;font-size:1.1rem;}";
-    html += ".card{background-color:#111111;border:1px solid #222222;border-radius:16px;padding:40px 20px;max-width:500px;margin:0 auto;box-shadow:0 10px 30px rgba(0,0,0,0.5);}";
-    html += ".code{background:#000;padding:10px;border-radius:8px;font-family:monospace;color:#34d399;margin:20px 0;}";
-    html += "</style></head>";
-    html += "<body><div class=\"card\">";
-    html += "<img src='data:image/png;base64,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' style='max-width:200px; margin-bottom: 20px;'>";
-    html += "<p>Seu sistema de controle de fermentação está <b>ONLINE</b>.</p>";
-    html += "<hr style=\"border-color:#222; margin:30px 0;\">";
-    html += "<p style=\"font-size:0.9rem;color:#888;\">Para enviar dados do seu iSpindel, configure-o com as seguintes rotas:</p>";
-    html += "<div class=\"code\">Server Address: breww.local<br>Server URI: /ispindel</div>";
-    html += "</div></body></html>";
+    html += F("<style>body{background-color:#0a0a0a;color:#ffffff;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;text-align:center;padding:10vh 20px;margin:0;}");
+    html += F("h1{color:#f59e0b;font-size:2.5rem;margin-bottom:10px;}");
+    html += F("p{color:#cccccc;font-size:1.1rem;}");
+    html += F(".card{background-color:#111111;border:1px solid #222222;border-radius:16px;padding:40px 20px;max-width:500px;margin:0 auto;box-shadow:0 10px 30px rgba(0,0,0,0.5);}");
+    html += F(".code{background:#000;padding:10px;border-radius:8px;font-family:monospace;color:#34d399;margin:20px 0;}");
+    html += F("</style></head>");
+    html += F("<body><div class=\"card\">");
+#if !BREWW_LITE // logo de 8,7 KB: no ESP8266 nao cabe na RAM
+    html += F("<img src='data:image/png;base64,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' style='max-width:200px; margin-bottom: 20px;'>");
+#endif
+    html += F("<p>Seu sistema de controle de fermentação está <b>ONLINE</b>.</p>");
+    html += F("<hr style=\"border-color:#222; margin:30px 0;\">");
+    html += F("<p style=\"font-size:0.9rem;color:#888;\">Para enviar dados do seu iSpindel, configure-o com as seguintes rotas:</p>");
+    html += F("<div class=\"code\">Server Address: breww.local<br>Server URI: /ispindel</div>");
+    html += F("</div></body></html>");
     server.send(200, "text/html", html);
 }
 
@@ -493,7 +511,7 @@ void handleIspindel() {
 }
 
 void init_network() {
-    Serial.println("Inicializando Módulo de Rede...");
+    Serial.println(F("Inicializando Módulo de Rede..."));
     
     // Inicia o driver Wi-Fi para evitar crash no server.begin()
     WiFi.mode(WIFI_STA);
@@ -513,12 +531,15 @@ void init_network() {
     // Conexao "meio morta" (sinal ruim): detecta em ~10-20 s em vez de ~30-45 s
     mqttClient.setKeepAlive(10);
     mqttClient.setSocketTimeout(5);
-    espClientTls.setCACert(cloud_root_cas()); // valida o certificado e o nome breww.live
+    cloud_tls_setup(espClientTls, MQTT_TLS_PORT); // valida o certificado e o nome breww.live
+#if !defined(ESP8266)
     espClientTls.setHandshakeTimeout(10);      // segundos; nao travar o loop se a 8883 nao responder
+#endif
     mqttClient.setServer(MQTT_SERVER, MQTT_TLS_PORT);
     mqttClient.setCallback(mqttCallback);
     server.on("/", HTTP_GET, handleRoot);
     
+#if !BREWW_LITE
     // Pagina local de atualizacao: usuario "breww" + codigo de confirmacao da tela (antes era aberta
     // para qualquer um na mesma rede gravar um firmware). O OTA pela nuvem segue o caminho normal.
     server.on("/update", HTTP_GET, []() {
@@ -536,7 +557,7 @@ void init_network() {
         if (upload.status == UPLOAD_FILE_START) uploadAuthorized = local_update_authorized();
         if (!uploadAuthorized) return; // sem senha: ignora o arquivo inteiro
         if (upload.status == UPLOAD_FILE_START) { 
-            Serial.printf("Update: %s\n", upload.filename.c_str());
+            Serial.printf_P(PSTR("Update: %s\n"), upload.filename.c_str());
             isUpdatingOTA = true;
             override_relays(false, false);
             ui_show_ota_screen();
@@ -547,13 +568,13 @@ void init_network() {
             if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
                 Update.printError(Serial);
             }
-            esp_task_wdt_reset();
+            plat_wdt_feed();
             if (Update.size() > 0) {
                 ui_update_ota_progress((Update.progress() * 100) / Update.size());
             }
         } else if (upload.status == UPLOAD_FILE_END) { 
             if (Update.end(true)) {
-                Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+                Serial.printf_P(PSTR("Update Success: %u\nRebooting...\n"), upload.totalSize);
                 ui_show_ota_success(true);
             } else {
                 Update.printError(Serial);
@@ -562,6 +583,7 @@ void init_network() {
             isUpdatingOTA = false;
         }
     });
+#endif
 
     server.onNotFound(handleNotFound);
     server.on("/ispindel", HTTP_POST, handleIspindel);
@@ -569,7 +591,7 @@ void init_network() {
 
 
 
-    Serial.println("Servidor Web (iSpindel) iniciado na porta 80");
+    Serial.println(F("Servidor Web (iSpindel) iniciado na porta 80"));
 }
 
 bool ota_started = false;
@@ -577,7 +599,11 @@ bool ota_started = false;
 // ---------------------------------------------------------------------------
 // Diagnostico remoto (fila pequena: eventos gerados sem conexao sao enviados depois)
 // ---------------------------------------------------------------------------
+#if BREWW_LITE
+#define DIAG_QUEUE_LEN 3 // RAM curta
+#else
 #define DIAG_QUEUE_LEN 8
+#endif
 static char diagQueue[DIAG_QUEUE_LEN][240];
 static int diagHead = 0, diagCount = 0;
 
@@ -601,21 +627,6 @@ static void diag_flush() {
     }
 }
 
-static const char* reset_reason_str(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON: return "energia";
-        case ESP_RST_SW: return "software";
-        case ESP_RST_PANIC: return "erro_fatal";
-        case ESP_RST_INT_WDT: return "watchdog_interrupcao";
-        case ESP_RST_TASK_WDT: return "watchdog_tarefa";
-        case ESP_RST_WDT: return "watchdog";
-        case ESP_RST_BROWNOUT: return "queda_tensao";
-        case ESP_RST_DEEPSLEEP: return "deep_sleep";
-        case ESP_RST_EXT: return "externo";
-        default: return "desconhecido";
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Roaming em rede mesh: o ESP32 nao troca de no sozinho. Se o sinal ficar fraco por
 // 1 minuto, procura o mesmo nome de rede em todos os canais e, se houver um no pelo
@@ -627,6 +638,9 @@ static const unsigned long ROAM_COOLDOWN_MS = 10UL * 60UL * 1000UL;
 static const int ROAM_MIN_GAIN_DB = 8;
 
 static void wifi_roaming_check() {
+#if defined(ESP8266)
+    return; // Lite: sem troca de no (a busca por canal/SSID do ESP32 nao existe aqui)
+#else
     static unsigned long weakSince = 0, lastRoam = 0, lastSample = 0;
     static bool scanning = false;
     if (isUpdatingOTA || WiFi.status() != WL_CONNECTED || savedSSID.length() == 0) { weakSince = 0; return; }
@@ -649,10 +663,10 @@ static void wifi_roaming_check() {
             uint8_t bssid[6];
             memcpy(bssid, WiFi.BSSID(best), 6);
             String toBssid = WiFi.BSSIDstr(best);
-            Serial.printf("[WiFi] Trocando de no da mesh: %s (%d dBm) -> %s (%d dBm, canal %d)\n",
+            Serial.printf_P(PSTR("[WiFi] Trocando de no da mesh: %s (%d dBm) -> %s (%d dBm, canal %d)\n"),
                           curBssid.c_str(), cur, toBssid.c_str(), toRssi, channel);
             char ev[200];
-            snprintf(ev, sizeof(ev), "{\"type\":\"wifi_roam\",\"from_rssi\":%d,\"to_rssi\":%d,\"from\":\"%s\",\"to\":\"%s\"}",
+            snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"wifi_roam\",\"from_rssi\":%d,\"to_rssi\":%d,\"from\":\"%s\",\"to\":\"%s\"}"),
                      cur, toRssi, curBssid.c_str(), toBssid.c_str());
             diag_report(ev);
             WiFi.scanDelete();
@@ -661,7 +675,7 @@ static void wifi_roaming_check() {
             WiFi.begin(savedSSID.c_str(), savedPASS.c_str(), channel, bssid);
             return;
         }
-        Serial.printf("[WiFi] Sinal fraco (%d dBm), mas nenhum no da mesh e melhor.\n", cur);
+        Serial.printf_P(PSTR("[WiFi] Sinal fraco (%d dBm), mas nenhum no da mesh e melhor.\n"), cur);
         WiFi.scanDelete();
         return;
     }
@@ -671,11 +685,12 @@ static void wifi_roaming_check() {
     if (WiFi.RSSI() > ROAM_WEAK_RSSI) { weakSince = 0; return; }
     if (!weakSince) weakSince = millis();
     if (millis() - weakSince < ROAM_WEAK_MS || (lastRoam && millis() - lastRoam < ROAM_COOLDOWN_MS)) return;
-    Serial.printf("[WiFi] Sinal fraco ha 1 min (%d dBm). Procurando no melhor da mesh...\n", WiFi.RSSI());
+    Serial.printf_P(PSTR("[WiFi] Sinal fraco ha 1 min (%d dBm). Procurando no melhor da mesh...\n"), WiFi.RSSI());
     lastRoam = millis(); // conta como tentativa (respeita o intervalo mesmo se nao trocar)
     weakSince = 0;
     // Busca assincrona so pela nossa rede (todos os canais, 120 ms por canal)
     if (WiFi.scanNetworks(true, false, false, 120, 0, savedSSID.c_str()) == WIFI_SCAN_RUNNING) scanning = true;
+#endif
 }
 
 // Perfil do ultimo handle_network (ms), lido pelo detector de travamento do loop
@@ -690,6 +705,7 @@ void handle_network() {
     
     // Atualizacao pela IDE na rede local: senha = codigo de confirmacao do aparelho (o mesmo da
     // pagina /update). Sem chave ainda (primeiros segundos com Wi-Fi), espera; nunca senha fixa.
+#if !BREWW_LITE
     String otaCode;
     if (!ota_started && cloud_pair_code(otaCode)) {
         ArduinoOTA.setHostname("breww");
@@ -707,34 +723,37 @@ void handle_network() {
             ui_show_ota_screen();
         });
         ArduinoOTA.onEnd([]() {
-            Serial.println("\nEnd OTA");
+            Serial.println(F("\nEnd OTA"));
             ui_show_ota_success(true);
             isUpdatingOTA = false;
         });
         ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-            esp_task_wdt_reset(); 
+            plat_wdt_feed();
             int p = (progress / (total / 100));
-            Serial.printf("Progress: %u%%\r", p);
+            Serial.printf_P(PSTR("Progress: %u%%\r"), p);
             ui_update_ota_progress(p);
         });
         ArduinoOTA.onError([](ota_error_t error) {
-            Serial.printf("Error[%u]: ", error);
-            if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-            else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-            else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-            else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-            else if (error == OTA_END_ERROR) Serial.println("End Failed");
+            Serial.printf_P(PSTR("Error[%u]: "), error);
+            if (error == OTA_AUTH_ERROR) Serial.println(F("Auth Failed"));
+            else if (error == OTA_BEGIN_ERROR) Serial.println(F("Begin Failed"));
+            else if (error == OTA_CONNECT_ERROR) Serial.println(F("Connect Failed"));
+            else if (error == OTA_RECEIVE_ERROR) Serial.println(F("Receive Failed"));
+            else if (error == OTA_END_ERROR) Serial.println(F("End Failed"));
             ui_show_ota_success(false);
             isUpdatingOTA = false;
         });
         ArduinoOTA.begin();
         ota_started = true;
-        Serial.println("ArduinoOTA Pronto e Escutando!");
+        Serial.println(F("ArduinoOTA Pronto e Escutando!"));
     }
+#endif
     
     wifi_roaming_check();
     unsigned long tp = millis();
+#if !BREWW_LITE
     if (ota_started) ArduinoOTA.handle();
+#endif
     prof_ota = millis() - tp; tp = millis();
     cloud_pairing_loop();
     prof_cloud = millis() - tp;
@@ -748,7 +767,7 @@ void handle_network() {
         if (now - lastMqttReconnectAttempt > 5000) {
             lastMqttReconnectAttempt = now;
             tp = millis();
-            Serial.println("[MQTT] Conexao perdida, reconectando...");
+            Serial.println(F("[MQTT] Conexao perdida, reconectando..."));
             mqttAttempts++;
             int stBefore = mqttClient.state();
             if (reconnectMqtt()) {
@@ -756,12 +775,12 @@ void handle_network() {
                 char ev[200];
                 if (!bootReported) {
                     bootReported = true;
-                    snprintf(ev, sizeof(ev), "{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u,\"otaTest\":%d,\"otaRolledBack\":%d}",
-                             reset_reason_str(esp_reset_reason()), FW_VERSION, millis(),
-                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                    snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u,\"otaTest\":%d,\"otaRolledBack\":%d}"),
+                             plat_reset_reason(), FW_VERSION, millis(),
+                             (unsigned)plat_free_heap(),
                              ota_guard_pending() ? 1 : 0, ota_guard_rolled_back_once() ? 1 : 0);
                 } else {
-                    snprintf(ev, sizeof(ev), "{\"type\":\"mqtt_reconnect\",\"ms\":%lu,\"down\":%lu,\"attempts\":%d,\"state\":%d,\"rssi\":%d}",
+                    snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"mqtt_reconnect\",\"ms\":%lu,\"down\":%lu,\"attempts\":%d,\"state\":%d,\"rssi\":%d}"),
                              millis() - tp, millis() - mqttDownSince, mqttAttempts, stBefore, (int)WiFi.RSSI());
                 }
                 diag_report(ev);
@@ -814,20 +833,20 @@ static void hardware_modules_json(char* out, size_t n) {
     size_t len = 0;
     auto add = [&](const char* m) {
         if (len + strlen(m) + 4 >= n) return;
-        len += snprintf(out + len, n - len, "%s\"%s\"", len > 1 ? "," : "", m);
+        len += snprintf_P(out + len, n - len, PSTR("%s\"%s\""), len > 1 ? "," : "", m);
     };
-    len = snprintf(out, n, "[");
+    len = snprintf_P(out, n, PSTR("["));
 #if BREWW_HAS_LVGL
     add("tela35");
 #else
     if (small_display_kind()) add(small_display_kind());
 #endif
     char ds[16];
-    snprintf(ds, sizeof(ds), "ds18b20:%d", ds18b20_count());
+    snprintf_P(ds, sizeof(ds), PSTR("ds18b20:%d"), ds18b20_count());
     add(ds);
     if (i2c_humidity_sensor()) add(i2c_humidity_sensor());
     else if (!isnan(currentHumidity)) add("dht22");
-    snprintf(out + len, n - len, "]");
+    snprintf_P(out + len, n - len, PSTR("]"));
 }
 
 void mqtt_publish_device_action(const char* json) {
@@ -845,7 +864,7 @@ void mqtt_publish_telemetry() {
     // Umidade invalida (NAN) vira null: "%.1f" de NAN geraria "nan", que eh JSON invalido
     char humStr[16];
     if (isnan(currentHumidity)) strcpy(humStr, "null");
-    else snprintf(humStr, sizeof(humStr), "%.1f", currentHumidity);
+    else snprintf_P(humStr, sizeof(humStr), PSTR("%.1f"), currentHumidity);
 
     // Quando chegou a ultima leitura do iSpindel (epoch, s). Os valores is_sg/is_bat ficam guardados
     // e sao repetidos em todo pacote; com is_epc o app/site sabem se a leitura e recente.
@@ -861,9 +880,10 @@ void mqtt_publish_telemetry() {
 
     // Perfil de fermentacao (so com perfil ativo, para o padrao de fabrica nunca sobrescrever
     // o lote no app/site): etapas {n,t,d(horas)}, etapa atual, horas na etapa e pausa.
-    char profile[900] = "";
+    static char profile[900]; // estatico: fora da pilha (ESP8266 tem 4 KB)
+    profile[0] = '\0';
     if (isRampActive && numRampSteps > 0) {
-        size_t len = snprintf(profile, sizeof(profile), "\"steps\":[");
+        size_t len = snprintf_P(profile, sizeof(profile), PSTR("\"steps\":["));
         for (int i = 0; i < numRampSteps && len < sizeof(profile) - 80; i++) {
             char nameEsc[48];
             size_t k = 0;
@@ -888,11 +908,10 @@ void mqtt_publish_telemetry() {
     char pinsErr[160] = "";
     if (const char* pe = pins_last_error()) {
         String esc = pe; esc.replace("\\", "/"); esc.replace("\"", "'");
-        snprintf(pinsErr, sizeof(pinsErr), ", \"pinsErr\":\"%s\"", esc.c_str());
+        snprintf_P(pinsErr, sizeof(pinsErr), PSTR(", \"pinsErr\":\"%s\""), esc.c_str());
     }
     static char payload[1800]; // estatico: fora da pilha do loop
-    snprintf(payload, sizeof(payload),
-             "{\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}",
+    snprintf_P(payload, sizeof(payload), PSTR("{\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}"),
              currentTemp, currentTemp2, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
              (isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado")),
              (long)WiFi.RSSI(), (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
@@ -906,7 +925,7 @@ void mqtt_publish_telemetry() {
         static int publishFailures = 0;
         if (++publishFailures >= 2) {
             publishFailures = 0;
-            Serial.println("[MQTT] Envio falhou 2x; conexao travada. Reconectando.");
+            Serial.println(F("[MQTT] Envio falhou 2x; conexao travada. Reconectando."));
             mqttClient.disconnect();
         }
     }

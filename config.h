@@ -14,12 +14,18 @@
     #include "boards/board_s3_headless.h"
 #elif defined(BREWW_BOARD_C3_HEADLESS)
     #include "boards/board_c3_headless.h"
+#elif defined(BREWW_BOARD_ESP8266_LITE) || defined(ESP8266)
+    #include "boards/board_esp8266_lite.h"
 #else
     #define BREWW_BOARD_S3_35
     #include "boards/board_s3_35.h"
 #endif
 
 #define DHTTYPE DHT22
+
+#ifndef BREWW_LITE
+#define BREWW_LITE 0
+#endif
 
 // ==========================================================
 // 3. CONFIGURACOES GERAIS DA CERVEJARIA

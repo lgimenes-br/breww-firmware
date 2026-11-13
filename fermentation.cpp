@@ -5,17 +5,24 @@
 #include "hal_profiles.h"
 #include "net_manager.h"
 
+static void set_step(int i, float days, float temp, const char* name) {
+    rampSteps[i].durationDays = days;
+    rampSteps[i].targetTemp = temp;
+    strncpy(rampSteps[i].name, name, sizeof(rampSteps[i].name) - 1);
+    rampSteps[i].name[sizeof(rampSteps[i].name) - 1] = '\0';
+}
+
 void ferm_start_preset(const char* style) {
     beerName = String("Físico: ") + String(style);
 
     if (strstr(style, "Lager")) {
-        rampSteps[0] = {7, 10.0, "Primaria"};
-        rampSteps[1] = {2, 16.0, "Diacetil"};
-        rampSteps[2] = {14, 2.0, "Maturação"};
+        set_step(0, 7, 10.0, "Primaria");
+        set_step(1, 2, 16.0, "Diacetil");
+        set_step(2, 14, 2.0, "Maturação");
     } else {
-        rampSteps[0] = {5, 18.0, "Primaria"};
-        rampSteps[1] = {2, 22.0, "Diacetil"};
-        rampSteps[2] = {7, 4.0, "Maturação"};
+        set_step(0, 5, 18.0, "Primaria");
+        set_step(1, 2, 22.0, "Diacetil");
+        set_step(2, 7, 4.0, "Maturação");
     }
     numRampSteps = 3;
     start_ramp_profile();

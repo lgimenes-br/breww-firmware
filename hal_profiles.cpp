@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Breww
 #include "hal_profiles.h"
 #include <time.h>
-#include <Preferences.h>
+#include "platform.h"
 
 // Motor de rampas (perfil de fermentacao) do controlador.
 // - As etapas ficam salvas no NVS ("breww": ramp_n + ramp_steps) e sobrevivem a reinicios.
@@ -70,7 +70,7 @@ void start_ramp_profile() {
     time_t now;
     if (!clock_valid(&now)) {
         // NTP ainda nao sincronizou, ignorar start por enquanto
-        Serial.println("[Rampas] Aguardando NTP para iniciar rampa...");
+        Serial.println(F("[Rampas] Aguardando NTP para iniciar rampa..."));
         return;
     }
 
@@ -125,7 +125,7 @@ void process_ramps() {
         apply_step_setpoint();
         save_ramp_state();
         request_dashboard_refresh = true;
-        Serial.printf("[Rampas] Avancou para etapa %d: %.1f C\n", currentRampStep, rampSteps[currentRampStep].targetTemp);
+        Serial.printf_P(PSTR("[Rampas] Avancou para etapa %d: %.1f C\n"), currentRampStep, rampSteps[currentRampStep].targetTemp);
     }
 }
 
@@ -136,7 +136,7 @@ void process_ramps() {
 /** Copia o nome cortando sem quebrar um caractere UTF-8 no meio */
 static void copy_step_name(char *dst, size_t size, const char *src, int index) {
     if (!src || !*src) {
-        snprintf(dst, size, "Etapa %d", index + 1);
+        snprintf_P(dst, size, PSTR("Etapa %d"), index + 1);
         return;
     }
     size_t len = strlen(src);
@@ -163,7 +163,7 @@ bool ramp_set_profile(JsonArrayConst steps, int stepIndex, float stepTimeHours) 
         n++;
     }
     if (n == 0) {
-        Serial.println("[Rampas] setProfile sem etapas validas, ignorado");
+        Serial.println(F("[Rampas] setProfile sem etapas validas, ignorado"));
         return false;
     }
 
@@ -188,7 +188,7 @@ bool ramp_set_profile(JsonArrayConst steps, int stepIndex, float stepTimeHours) 
     save_ramp_steps();
     save_ramp_state();
     request_dashboard_refresh = true;
-    Serial.printf("[Rampas] Perfil recebido: %d etapas, etapa %d, %.1f h decorridas\n", n, stepIndex, stepTimeHours);
+    Serial.printf_P(PSTR("[Rampas] Perfil recebido: %d etapas, etapa %d, %.1f h decorridas\n"), n, stepIndex, stepTimeHours);
     return true;
 }
 
@@ -203,7 +203,7 @@ bool ramp_skip_step() {
     apply_step_setpoint();
     save_ramp_state();
     request_dashboard_refresh = true;
-    Serial.printf("[Rampas] Etapa avancada manualmente para %d\n", currentRampStep);
+    Serial.printf_P(PSTR("[Rampas] Etapa avancada manualmente para %d\n"), currentRampStep);
     return true;
 }
 
@@ -224,7 +224,7 @@ bool ramp_toggle_pause() {
     }
     save_ramp_state();
     request_dashboard_refresh = true;
-    Serial.printf("[Rampas] Perfil %s\n", isRampPaused ? "pausado" : "retomado");
+    Serial.printf_P(PSTR("[Rampas] Perfil %s\n"), isRampPaused ? "pausado" : "retomado");
     return true;
 }
 
@@ -235,7 +235,7 @@ void ramp_stop() {
     rampPendingElapsedSec = -1;
     save_ramp_state();
     request_dashboard_refresh = true;
-    Serial.println("[Rampas] Perfil encerrado remotamente");
+    Serial.println(F("[Rampas] Perfil encerrado remotamente"));
 }
 
 /** Ao voltar para o modo fermentador com o perfil ativo, retoma a temperatura da etapa */

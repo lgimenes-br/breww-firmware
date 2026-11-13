@@ -7,7 +7,7 @@
 #include "wifi_setup.h"
 #include "wifi_portal.h"
 #include "version.h"
-#include <WiFi.h>
+#include "platform.h"
 
 // ---- Protocolo ----
 enum : uint8_t { TYPE_STATE = 0x01, TYPE_ERROR = 0x02, TYPE_RPC = 0x03, TYPE_RPC_RESULT = 0x04 };
@@ -24,15 +24,7 @@ static size_t len = 0;
 static bool provisioning = false;
 static unsigned long provisioningSince = 0;
 
-static const char* chip_family() {
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-    return "ESP32-S3";
-#elif defined(CONFIG_IDF_TARGET_ESP32C3)
-    return "ESP32-C3";
-#else
-    return "ESP32";
-#endif
-}
+static const char* chip_family() { return plat_chip_family(); }
 
 static void send_packet(uint8_t type, const uint8_t* data, uint8_t n) {
     uint8_t out[6 + 3 + 255 + 1];
@@ -49,6 +41,8 @@ static void send_packet(uint8_t type, const uint8_t* data, uint8_t n) {
     Serial.write('\n');
     Serial.flush();
 }
+
+static String bytes_to_string(const uint8_t* p, size_t n) { String s; s.reserve(n); for (size_t i = 0; i < n; i++) s += (char)p[i]; return s; }
 
 static void send_state(uint8_t s) { send_packet(TYPE_STATE, &s, 1); }
 static void send_error(uint8_t e) { send_packet(TYPE_ERROR, &e, 1); }
@@ -102,10 +96,10 @@ static void handle_rpc(const uint8_t* d, uint8_t n) {
         if (plen < 1) { send_error(ERR_INVALID_RPC); return; }
         uint8_t sl = p[0];
         if (1 + sl + 1 > plen) { send_error(ERR_INVALID_RPC); return; }
-        String ssid((const char*)(p + 1), sl);
+        String ssid = bytes_to_string(p + 1, sl);
         uint8_t pl = p[1 + sl];
         if (1 + sl + 1 + pl > plen) { send_error(ERR_INVALID_RPC); return; }
-        String pass((const char*)(p + 2 + sl), pl);
+        String pass = bytes_to_string(p + 2 + sl, pl);
         send_state(STATE_PROVISIONING);
         provisioning = true;
         provisioningSince = millis();

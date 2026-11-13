@@ -7,7 +7,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <DHT.h>
-#include <Preferences.h>
+#include "platform.h"
 #include "config.h"
 #include "globals.h"
 

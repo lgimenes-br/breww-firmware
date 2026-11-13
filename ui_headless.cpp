@@ -22,7 +22,7 @@
 #include "button_menu.h"
 #include "improv_serial.h"
 #include "hal_sensors.h"
-#include <WiFi.h>
+#include "platform.h"
 
 // ---------------- Estado mostrado no LED ----------------
 static bool otaActive = false;
@@ -69,12 +69,12 @@ static void button_update() {
     unsigned long held = t - pressedAt;
     if (pairPending && held >= HOLD_CONFIRM_MS) {
         holdHandled = true;
-        Serial.println("[Botao] Vinculo CONFIRMADO pelo botao");
+        Serial.println(F("[Botao] Vinculo CONFIRMADO pelo botao"));
         cloud_pairing_respond(true);
         pairPending = false;
     } else if (!pairPending && held >= HOLD_RESET_WIFI_MS) {
         holdHandled = true;
-        Serial.println("[Botao] 10 s: apagando o Wi-Fi salvo e reiniciando");
+        Serial.println(F("[Botao] 10 s: apagando o Wi-Fi salvo e reiniciando"));
         clear_wifi_credentials();
         delay(300);
         ESP.restart();
@@ -83,20 +83,20 @@ static void button_update() {
 
 // ---------------- Serial ----------------
 static void print_help() {
-    Serial.println("Comandos: wifi <rede> <senha> | codigo | status | tela sh1106|ssd1306 | rele normal|invertido | pinos | pino <papel> <gpio> | reiniciar");
+    Serial.println(F("Comandos: wifi <rede> <senha> | codigo | status | tela sh1106|ssd1306 | rele normal|invertido | pinos | pino <papel> <gpio> | reiniciar"));
 }
 
 static void print_status() {
     String code;
-    Serial.printf("[Status] placa %s | modo %d | temp %.2f / alvo %.2f | Wi-Fi %s (%s) | nuvem %s\n",
+    Serial.printf_P(PSTR("[Status] placa %s | modo %d | temp %.2f / alvo %.2f | Wi-Fi %s (%s) | nuvem %s\n"),
                   BREWW_BOARD_NAME, currentMode, currentTemp, currentSetpoint,
                   WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado",
                   WiFi.SSID().c_str(), mqttClient.connected() ? "conectada" : "desconectada");
-    if (cloud_pair_code(code)) Serial.printf("[Status] codigo de confirmacao: %s (ID %s)\n", code.c_str(), get_device_id().c_str());
+    if (cloud_pair_code(code)) Serial.printf_P(PSTR("[Status] codigo de confirmacao: %s (ID %s)\n"), code.c_str(), get_device_id().c_str());
     // Diagnostico da instalacao (o assistente do site guarda estas linhas no log)
-    Serial.printf("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n",
+    Serial.printf_P(PSTR("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n"),
                   sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? "ok" : "sem leitura (reles desligados)",
-                  temperatureRead(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());
+                  plat_chip_temp(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());
 }
 
 static void serial_update() {
@@ -121,19 +121,19 @@ static void serial_update() {
                 pass = sp > 0 ? rest.substring(sp + 1) : "";
             }
             pass.trim();
-            Serial.printf("[Wi-Fi] Conectando em \"%s\"...\n", ssid.c_str());
+            Serial.printf_P(PSTR("[Wi-Fi] Conectando em \"%s\"...\n"), ssid.c_str());
             wifi_setup_connect_new(ssid, pass);
         } else if (line == "codigo" || line == "code") {
             String code;
-            if (cloud_pair_code(code)) Serial.printf("[Vinculo] Codigo de confirmacao: %s (ID %s)\n", code.c_str(), get_device_id().c_str());
-            else Serial.println("[Vinculo] Codigo ainda nao gerado (conecte o Wi-Fi primeiro)");
+            if (cloud_pair_code(code)) Serial.printf_P(PSTR("[Vinculo] Codigo de confirmacao: %s (ID %s)\n"), code.c_str(), get_device_id().c_str());
+            else Serial.println(F("[Vinculo] Codigo ainda nao gerado (conecte o Wi-Fi primeiro)"));
         } else if (line == "status") {
             print_status();
         } else if (line == "pinos") {
             char buf[160]; pins_to_json(buf, sizeof(buf));
-            Serial.printf("[Pinos] %s\n[Pinos] Papeis: ow dht h c sda scl bup bdn (-1 = sem). Ex.: pino h 25 | pinos padrao\n", buf);
+            Serial.printf_P(PSTR("[Pinos] %s\n[Pinos] Papeis: ow dht h c sda scl bup bdn (-1 = sem). Ex.: pino h 25 | pinos padrao\n"), buf);
         } else if (line == "pinos padrao") {
-            pins_reset_defaults(); Serial.println("[Pinos] Padrao da placa. Reiniciando..."); delay(300); ESP.restart();
+            pins_reset_defaults(); Serial.println(F("[Pinos] Padrao da placa. Reiniciando...")); delay(300); ESP.restart();
         } else if (line.startsWith("pino ")) {
             // pino <papel> <gpio>   papeis: ow dht h c sda scl bup bdn
             String rest = line.substring(5); rest.trim();
@@ -144,21 +144,21 @@ static void serial_update() {
             int8_t* slot = role == "ow" ? &np.oneWire : role == "dht" ? &np.dht : role == "h" ? &np.heater : role == "c" ? &np.cooler
                          : role == "sda" ? &np.sda : role == "scl" ? &np.scl : role == "bup" ? &np.btnUp : role == "bdn" ? &np.btnDown : nullptr;
             String err;
-            if (!slot || gpio < -1) Serial.println("[Pinos] Use: pino <ow|dht|h|c|sda|scl|bup|bdn> <gpio ou -1>");
-            else { *slot = (int8_t)gpio; if (pins_save(np, err)) { Serial.println("[Pinos] Gravado. Reiniciando..."); delay(300); ESP.restart(); } else Serial.printf("[Pinos] Recusado: %s\n", err.c_str()); }
+            if (!slot || gpio < -1) Serial.println(F("[Pinos] Use: pino <ow|dht|h|c|sda|scl|bup|bdn> <gpio ou -1>"));
+            else { *slot = (int8_t)gpio; if (pins_save(np, err)) { Serial.println(F("[Pinos] Gravado. Reiniciando...")); delay(300); ESP.restart(); } else Serial.printf_P(PSTR("[Pinos] Recusado: %s\n"), err.c_str()); }
         } else if (line.startsWith("rele")) {
             // rele normal | rele invertido | rele aquecer invertido | rele resfriar normal
             String arg = line.substring(4); arg.trim(); arg.toLowerCase();
             bool inv = arg.endsWith("invertido");
             bool ok = inv || arg.endsWith("normal");
-            if (!ok) Serial.println("[Reles] Use: rele normal | rele invertido | rele aquecer invertido | rele resfriar normal");
+            if (!ok) Serial.println(F("[Reles] Use: rele normal | rele invertido | rele aquecer invertido | rele resfriar normal"));
             else if (arg.startsWith("aquecer")) relays_set_inverted(inv, relay_cooler_inverted());
             else if (arg.startsWith("resfriar")) relays_set_inverted(relay_heater_inverted(), inv);
             else relays_set_inverted(inv, inv);
         } else if (line.startsWith("tela ")) {
             String drv = line.substring(5); drv.trim(); drv.toLowerCase();
-            if (small_display_set_oled_driver(drv)) { Serial.printf("[Tela] Driver do OLED: %s. Reiniciando...\n", drv.c_str()); delay(300); ESP.restart(); }
-            else Serial.println("[Tela] Use: tela sh1106  (OLED 1,3\")  ou  tela ssd1306  (OLED 0,96\")");
+            if (small_display_set_oled_driver(drv)) { Serial.printf_P(PSTR("[Tela] Driver do OLED: %s. Reiniciando...\n"), drv.c_str()); delay(300); ESP.restart(); }
+            else Serial.println(F("[Tela] Use: tela sh1106  (OLED 1,3\")  ou  tela ssd1306  (OLED 0,96\")"));
         } else if (line == "reiniciar" || line == "reboot") {
             ESP.restart();
         } else if (line.length()) {
@@ -173,9 +173,9 @@ void init_ui() {
     if (PIN_STATUS_LED >= 0) pinMode(PIN_STATUS_LED, OUTPUT);
     led_write(false);
     pinMode(PIN_BUTTON_BOOT, INPUT_PULLUP);
-    Serial.printf("[UI] Placa %s sem tela grande. ", BREWW_BOARD_NAME);
+    Serial.printf_P(PSTR("[UI] Placa %s sem tela grande. "), BREWW_BOARD_NAME);
     print_help();
-    if (!has_wifi_credentials()) Serial.println("[UI] Sem Wi-Fi salvo: conecte o celular na rede Breww-XXXX (portal) ou use  wifi <rede> <senha>");
+    if (!has_wifi_credentials()) Serial.println(F("[UI] Sem Wi-Fi salvo: conecte o celular na rede Breww-XXXX (portal) ou use  wifi <rede> <senha>"));
     small_display_begin();
     i2c_sensors_begin(); // mesmo barramento da tela pequena
     menu_begin();        // botoes subir/descer (se configurados)
@@ -205,13 +205,13 @@ static void display_update() {
     }
     static char footer[40];
     if (currentMode == MODE_FERM && isRampActive && numRampSteps > 0)
-        snprintf(footer, sizeof(footer), "Etapa %d/%d %s", currentRampStep + 1, numRampSteps, rampSteps[currentRampStep].name);
+        snprintf_P(footer, sizeof(footer), PSTR("Etapa %d/%d %s"), currentRampStep + 1, numRampSteps, rampSteps[currentRampStep].name);
     else if (currentMode == MODE_CHOPP)
-        snprintf(footer, sizeof(footer), "%s", beerName.c_str());
+        snprintf_P(footer, sizeof(footer), PSTR("%s"), beerName.c_str());
     else if (wifi_portal_active() && WiFi.status() != WL_CONNECTED)
-        snprintf(footer, sizeof(footer), "Wi-Fi: %s", wifi_portal_ssid().c_str());
+        snprintf_P(footer, sizeof(footer), PSTR("Wi-Fi: %s"), wifi_portal_ssid().c_str());
     else if (WiFi.status() != WL_CONNECTED)
-        snprintf(footer, sizeof(footer), "Sem Wi-Fi");
+        snprintf_P(footer, sizeof(footer), PSTR("Sem Wi-Fi"));
     else footer[0] = 0;
 
     SmallDisplayState st;
@@ -234,12 +234,12 @@ static void display_update() {
 void loop_ui() {
     // Acompanha a conexao iniciada pelo comando "wifi" (rede nova que falha tem a senha apagada)
     WifiSetupState ws = wifi_setup_poll();
-    if (ws == WIFI_SETUP_CONNECTED) { Serial.printf("[Wi-Fi] Conectado (%s)\n", WiFi.localIP().toString().c_str()); wifi_setup_reset(); }
-    else if (ws == WIFI_SETUP_FAILED) { Serial.println("[Wi-Fi] Nao conectou em 15 s (senha errada?)"); wifi_setup_reset(); }
+    if (ws == WIFI_SETUP_CONNECTED) { Serial.printf_P(PSTR("[Wi-Fi] Conectado (%s)\n"), WiFi.localIP().toString().c_str()); wifi_setup_reset(); }
+    else if (ws == WIFI_SETUP_FAILED) { Serial.println(F("[Wi-Fi] Nao conectou em 15 s (senha errada?)")); wifi_setup_reset(); }
 
     if (pairPending && (long)(millis() - pairDeadline) > 0) {
         pairPending = false;
-        Serial.println("[Vinculo] Pedido expirou");
+        Serial.println(F("[Vinculo] Pedido expirou"));
     }
     wifi_portal_loop(); // abre a rede "Breww-XXXX" sem Wi-Fi configurado (ou sem conectar ha 3 min)
     button_update();
@@ -259,12 +259,12 @@ void ui_update_temperatures() {
 void ui_update_relays() {}
 void ui_update_ispindel() {}
 
-void ui_show_ota_screen() { otaActive = true; otaPercent = 0; Serial.println("[OTA] Atualizando firmware..."); }
+void ui_show_ota_screen() { otaActive = true; otaPercent = 0; Serial.println(F("[OTA] Atualizando firmware...")); }
 void ui_update_ota_progress(int percent) {
-    if (percent / 10 != otaPercent / 10) Serial.printf("[OTA] %d%%\n", percent);
+    if (percent / 10 != otaPercent / 10) Serial.printf_P(PSTR("[OTA] %d%%\n"), percent);
     otaPercent = percent;
 }
-void ui_ota_status(const char* text) { Serial.printf("[OTA] %s\n", text); }
+void ui_ota_status(const char* text) { Serial.printf_P(PSTR("[OTA] %s\n"), text); }
 void ui_hide_ota_screen() { otaActive = false; }
 void ui_show_ota_success(bool success) {
     Serial.println(success ? "[OTA] Concluida, reiniciando" : "[OTA] Falhou");
@@ -275,13 +275,13 @@ void ui_show_pair_confirm(const char* email, const char* deviceName, int expires
     pairPending = true;
     pairDeadline = millis() + (unsigned long)(expiresIn > 0 ? expiresIn : 120) * 1000UL;
     pairEmail = email ? email : "";
-    Serial.printf("[Vinculo] Pedido de %s para \"%s\". Segure o botao BOOT por 3 s para confirmar.\n",
+    Serial.printf_P(PSTR("[Vinculo] Pedido de %s para \"%s\". Segure o botao BOOT por 3 s para confirmar.\n"),
                   email ? email : "?", deviceName ? deviceName : "");
 }
 void ui_hide_pair_confirm() { pairPending = false; }
 void ui_pair_result(const char* status, bool requestOk) {
     pairPending = false;
-    Serial.printf("[Vinculo] Resultado: %s%s\n", status && *status ? status : "?", requestOk ? "" : " (falha de rede)");
+    Serial.printf_P(PSTR("[Vinculo] Resultado: %s%s\n"), status && *status ? status : "?", requestOk ? "" : " (falha de rede)");
 }
 
 #endif // !BREWW_HAS_LVGL

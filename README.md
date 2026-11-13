@@ -22,7 +22,8 @@ pede o Wi-Fi logo depois de gravar. Depois, no app, toque em *Adicionar aparelho
 | Breww com tela 3,5" (ESP32-S3, touch) | `s3-35` (padrão) | Placa oficial, conectores JST |
 | ESP32 DevKit (WROOM-32 / V1) | `esp32-devkit` | A mais fácil de achar |
 | ESP32-S3-DevKitC | `s3-headless` | Sem tela |
-| ESP32-C3 SuperMini | `c3-headless` | Bem pequena |
+| ESP32-C3 SuperMini | `c3-headless` | Bem pequena e a mais barata |
+| ESP8266 (NodeMCU, Wemos D1 mini; 4 MB) | `esp8266-lite` | Versão **Lite** (veja abaixo) |
 
 Os pinos de cada placa estão em [`boards/`](boards). Nas placas sem tela:
 
@@ -31,6 +32,21 @@ Os pinos de cada placa estão em [`boards/`](boards). Nas placas sem tela:
 - Opcional: tela OLED/LCD I²C pequena e dois botões para o menu.
 
 O mapa de ligações de cada placa está em [breww.live/instalar](https://breww.live/instalar#pecas).
+
+### Versão Lite (ESP8266)
+
+O ESP8266 tem cerca de 80 KB de RAM, um quarto do ESP32. A versão Lite usa o mesmo código, com a
+camada [`platform.h`](platform.h) trocando o que muda de um chip para o outro (configurações em
+LittleFS com a mesma interface de `Preferences`, BearSSL no lugar do mbedTLS, sem tarefas em paralelo).
+
+- Funciona igual: controle da fermentação, perfis, app, iSpindel, Wi-Fi pelo instalador e atualização pelo app.
+- Uma conexão TLS por vez: durante um HTTPS (anúncio, vínculo, atualização) o MQTT sai e volta em seguida.
+  Com o servidor aceitando fragmentos de 1 KB (MFLN), os buffers do TLS caem de ~17 KB para 2 KB.
+- Ficam de fora: tela pequena, botões e sensores I²C; volta automática de versão (o ESP8266 não tem
+  partição de volta: a imagem nova só é ativada se o MD5 conferir); atualização local pela IDE e pela
+  página `/update`; troca de nó em rede mesh.
+- Relés no D1 (GPIO 5) e no D2 (GPIO 4), que não mudam de estado no boot; sensores no D5, D6 ou D7.
+- Textos de log ficam na flash (`F()`, `PSTR()`, `printf_P`), senão ocupariam quase 20 KB de RAM.
 
 ## Compilar
 
@@ -53,8 +69,10 @@ arduino-cli compile \
   .
 ```
 
-Outras placas: `-DBREWW_BOARD_S3_HEADLESS` (`esp32:esp32:esp32s3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`)
-e `-DBREWW_BOARD_C3_HEADLESS` (`esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`).
+Outras placas: `-DBREWW_BOARD_S3_HEADLESS` (`esp32:esp32:esp32s3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`),
+`-DBREWW_BOARD_C3_HEADLESS` (`esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`) e
+`-DBREWW_BOARD_ESP8266_LITE` (`esp8266:esp8266:nodemcuv2:eesz=4M1M`, core `esp8266:esp8266@3.1.2`
+de `https://arduino.esp8266.com/stable/package_esp8266com_index.json`).
 Sem flag, compila a placa de tela 3,5" (veja o `FQBN` completo no workflow).
 
 ## Serial (115200)

@@ -90,7 +90,7 @@ void i2c_sensors_begin() {
     else if (present(0x76) || present(0x77)) {
         addr = present(0x76) ? 0x76 : 0x77;
         kind = BME280;
-        if (!bme_init()) { kind = NONE; Serial.printf("[I2C] 0x%02X nao e um BME280 (BMP280 nao mede umidade)\n", addr); }
+        if (!bme_init()) { kind = NONE; Serial.printf_P(PSTR("[I2C] 0x%02X nao e um BME280 (BMP280 nao mede umidade)\n"), addr); }
     }
     if (kind == AHT20) {
         delay(40);
@@ -98,7 +98,7 @@ void i2c_sensors_begin() {
         read_bytes(&st, 1);
         if (!(st & 0x08)) { const uint8_t initCmd[3] = {0xBE, 0x08, 0x00}; write_bytes(initCmd, 3); delay(10); }
     }
-    if (kind != NONE) Serial.printf("[I2C] Sensor de umidade %s em 0x%02X (substitui o DHT22)\n", i2c_humidity_sensor(), addr);
+    if (kind != NONE) Serial.printf_P(PSTR("[I2C] Sensor de umidade %s em 0x%02X (substitui o DHT22)\n"), i2c_humidity_sensor(), addr);
     nextAt = millis() + 1000;
 }
 

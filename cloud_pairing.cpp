@@ -1,20 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Breww
 #include "cloud_pairing.h"
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
-#include <Update.h>
+#include "platform.h"
 #include <ArduinoJson.h>
-#include <Preferences.h>
-#include <esp_mac.h>
-#include <esp_random.h>
 #include <PubSubClient.h>
-#include "mbedtls/md.h"
-#include <esp_heap_caps.h>
-#include "mbedtls/platform.h"
 #include <time.h>
 #include <atomic>
+#if !defined(ESP8266)
+#include <Update.h>
+#include <esp_mac.h>
+#include "mbedtls/platform.h"
+#endif
 #include "ui.h"
 
 // ---------------------------------------------------------------------------
@@ -37,7 +33,7 @@ static const unsigned long ANNOUNCE_UNBOUND_MS = 10UL * 1000UL;
 static const unsigned long ANNOUNCE_REJECTED_MS = 60UL * 1000UL;
 
 // ISRG Root X1 + ISRG Root X2 (Let's Encrypt). Validos ate 2035/2040.
-static const char ISRG_ROOT_CAS[] = R"PEM(
+static const char ISRG_ROOT_CAS[] PROGMEM = R"PEM(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
@@ -92,6 +88,10 @@ tL4ndQavEi51mI38AjEAi/V3bNTIZargCyzuFJ0nN6T5U6VR5CmD1/iQMVtCnwr1
 // de RAM interna).
 // ---------------------------------------------------------------------------
 
+static volatile bool cloudPaused = false; // OTA em andamento
+void cloud_pause_background(bool paused) { cloudPaused = paused; }
+
+#if !defined(ESP8266)
 static void* tls_calloc(size_t n, size_t size) {
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -109,8 +109,6 @@ static void* internal_calloc(size_t n, size_t size) {
 // Antes, a primeira a terminar restaurava a RAM interna no meio da outra.
 static std::atomic<int> tlsScopeDepth{0};
 
-static volatile bool cloudPaused = false; // OTA em andamento
-void cloud_pause_background(bool paused) { cloudPaused = paused; }
 struct TlsPsramScope { // (campo "active" publico: usado no diagnostico da OTA)
     bool active;
     // Preferimos RAM interna: com o TLS na PSRAM, o acelerador AES precisa de um buffer
@@ -124,14 +122,67 @@ struct TlsPsramScope { // (campo "active" publico: usado no diagnostico da OTA)
         if (active && tlsScopeDepth.fetch_sub(1) == 1) mbedtls_platform_set_calloc_free(internal_calloc, tls_free);
     }
 };
+#else
+struct TlsPsramScope { bool active = false; }; // ESP8266: sem PSRAM nem alocador do mbedTLS
+#endif
+
+// ---------------------------------------------------------------------------
+// TLS para breww.live (HTTPS e MQTT): valida o certificado pelas raizes ISRG.
+// No ESP8266 (BearSSL) a RAM e curta: se o servidor aceitar fragmentos de 1 KB (MFLN), os buffers
+// caem de ~17 KB para 2 KB. A sondagem e feita uma vez por porta.
+// ---------------------------------------------------------------------------
+#if defined(ESP8266)
+static BearSSL::X509List* trustAnchors() {
+    static BearSSL::X509List* list = nullptr;
+    if (!list) {
+        // As raizes ficam na flash (PROGMEM); o X509List precisa do texto na RAM so durante a leitura
+        size_t n = strlen_P(ISRG_ROOT_CAS);
+        char* pem = (char*)malloc(n + 1);
+        if (!pem) return nullptr;
+        memcpy_P(pem, ISRG_ROOT_CAS, n + 1);
+        list = new BearSSL::X509List(pem);
+        free(pem);
+    }
+    return list;
+}
+#endif
+
+void cloud_tls_setup(WiFiClientSecure& c, uint16_t port) {
+#if defined(ESP8266)
+    if (BearSSL::X509List* ta = trustAnchors()) c.setTrustAnchors(ta);
+    c.setX509Time(time(nullptr));
+    static int8_t mfln443 = -1, mfln8883 = -1;
+    int8_t& m = port == 443 ? mfln443 : mfln8883;
+    if (m < 0 && WiFi.status() == WL_CONNECTED) { // sem rede a sondagem falharia e ficaria gravada como "recusado"
+        m = BearSSL::WiFiClientSecure::probeMaxFragmentLength("breww.live", port, 1024) ? 1 : 0;
+        Serial.printf_P(PSTR("[TLS] Porta %u: fragmento de 1 KB %s\n"), port, m ? "aceito (buffers pequenos)" : "recusado (buffers de 16 KB)");
+    }
+    if (m == 1) c.setBufferSizes(1024, 1024);
+#else
+    (void)port;
+    c.setCACert(ISRG_ROOT_CAS);
+#endif
+}
+
+static int tls_last_error(WiFiClientSecure& c, char* buf, size_t n) {
+#if defined(ESP8266)
+    return c.getLastSSLError(buf, n);
+#else
+    return c.lastError(buf, n);
+#endif
+}
 
 const char* cloud_root_cas() { return ISRG_ROOT_CAS; }
 
 String get_device_id() {
     uint8_t mac[6];
+#if defined(ESP8266)
+    WiFi.macAddress(mac);
+#else
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
+#endif
     char buf[13];
-    snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf_P(buf, sizeof(buf), PSTR("%02X%02X%02X%02X%02X%02X"), mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
 }
 
@@ -145,13 +196,13 @@ static const String& get_device_key() {
     if (k.length() != 64) {
         // Gerada so com Wi-Fi ligado (o RNG de hardware tem entropia real nesse momento)
         uint8_t raw[32];
-        esp_fill_random(raw, sizeof(raw));
+        plat_random(raw, sizeof(raw));
         char hex[65];
         for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", raw[i]);
         hex[64] = '\0';
         k = String(hex);
         p.putString("dev_key", k);
-        Serial.println("[Cloud] Nova chave do aparelho gerada.");
+        Serial.println(F("[Cloud] Nova chave do aparelho gerada."));
     }
     p.end();
     deviceKey = k;
@@ -190,13 +241,7 @@ static String derive_mqtt_password() {
 
 static String hmac_hex(const String& key, const char* ctx) {
     uint8_t out[32];
-    mbedtls_md_context_t md;
-    mbedtls_md_init(&md);
-    mbedtls_md_setup(&md, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
-    mbedtls_md_hmac_starts(&md, (const unsigned char*)key.c_str(), key.length());
-    mbedtls_md_hmac_update(&md, (const unsigned char*)ctx, strlen(ctx));
-    mbedtls_md_hmac_finish(&md, out);
-    mbedtls_md_free(&md);
+    plat_hmac_sha256((const uint8_t*)key.c_str(), key.length(), (const uint8_t*)ctx, strlen(ctx), out);
     char hex[65];
     for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", out[i]);
     hex[64] = '\0';
@@ -228,7 +273,7 @@ bool cloud_mqtt_credentials(String& user, String& pass) {
 static bool checkRequested = false;
 
 void cloud_mqtt_credentials_rejected() {
-    Serial.println("[Cloud] Broker recusou a credencial propria; voltando ao legado e pedindo novo registro.");
+    Serial.println(F("[Cloud] Broker recusou a credencial propria; voltando ao legado e pedindo novo registro."));
     save_mqtt_flag(false);
     checkRequested = true; // o proximo anuncio recria a credencial no servidor
 }
@@ -236,9 +281,11 @@ void cloud_mqtt_credentials_rejected() {
 // POST JSON autenticado. Retorna o status HTTP (ou <0 em erro de conexao/TLS).
 static int api_post_impl(const char* path, JsonDocument& body, JsonDocument& out) {
     WiFiClientSecure client;
-    client.setCACert(ISRG_ROOT_CAS);
+    cloud_tls_setup(client, 443);
     HTTPClient http;
+#if !defined(ESP8266)
     http.setConnectTimeout(8000);
+#endif
     http.setTimeout(8000);
     if (!http.begin(client, String(CLOUD_API_BASE) + path)) return -1;
     http.addHeader("Content-Type", "application/json");
@@ -254,17 +301,15 @@ static int api_post_impl(const char* path, JsonDocument& body, JsonDocument& out
         if (err) out.clear();
     }
     if (code != 200) {
-        Serial.printf("[Cloud] POST %s -> %d (%s)\n", path, code, http.errorToString(code).c_str());
+        Serial.printf_P(PSTR("[Cloud] POST %s -> %d (%s)\n"), path, code, http.errorToString(code).c_str());
         if (code < 0) {
             // Diagnostico de TLS: motivo do mbedTLS, memoria interna e relogio
             char tlsErr[128] = {0};
-            int tlsCode = client.lastError(tlsErr, sizeof(tlsErr));
+            int tlsCode = tls_last_error(client, tlsErr, sizeof(tlsErr));
             time_t nowTs = time(nullptr);
-            Serial.printf("[Cloud] TLS: %d %s | heap interno livre %u, maior bloco %u | PSRAM livre %u | hora %ld\n",
+            Serial.printf_P(PSTR("[Cloud] TLS: %d %s | heap interno livre %u, maior bloco %u | PSRAM livre %u | hora %ld\n"),
                           tlsCode, tlsErr,
-                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                          (unsigned)plat_free_heap(), (unsigned)plat_largest_block(), (unsigned)plat_psram_free(),
                           (long)nowTs);
         }
     }
@@ -287,9 +332,19 @@ static int api_post(const char* path, JsonDocument& body, JsonDocument& out) {
 //  - nada de LVGL nela (nao e thread-safe)
 // O loop principal envia pedidos e consome os resultados sob um mutex.
 // ===========================================================================
+#if defined(ESP8266)
+// Sem tarefas: o trabalho de rede roda no proprio loop (o handshake trava o loop 1-3 s; os reles
+// seguem seguros, so o pulso em andamento fica um pouco mais longo). Uma conexao TLS por vez.
+#define CLOUD_LOCK()
+#define CLOUD_UNLOCK()
+static bool cloudTaskFailed = false;
+#else
 static SemaphoreHandle_t cloudMutex = nullptr;
 static TaskHandle_t cloudTask = nullptr;
 static bool cloudTaskFailed = false;
+#define CLOUD_LOCK() xSemaphoreTake(cloudMutex, portMAX_DELAY)
+#define CLOUD_UNLOCK() xSemaphoreGive(cloudMutex)
+#endif
 
 // Pedidos (loop principal -> tarefa)
 static bool reqAnnounce = false;
@@ -310,21 +365,26 @@ static bool resRespondReady = false;
 static int resRespondCode = 0;
 static String resRespondStatus;
 
-static void cloud_task_fn(void*) {
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
-        if (cloudPaused) continue; // OTA em andamento: nao disputar memoria/rede
+static void cloud_work() {
+        if (cloudPaused) return; // OTA em andamento: nao disputar memoria/rede
 
         bool doRespond = false, doAnnounce = false, accept = false;
         String pairingId, localIp;
-        xSemaphoreTake(cloudMutex, portMAX_DELAY);
+        CLOUD_LOCK();
         if (reqRespond) {
             doRespond = true; pairingId = reqPairingId; accept = reqAccept; reqRespond = false;
         } else if (reqAnnounce) {
             doAnnounce = true; localIp = reqLocalIp; reqAnnounce = false;
         }
-        xSemaphoreGive(cloudMutex);
+        CLOUD_UNLOCK();
 
+#if defined(ESP8266)
+        if (doRespond || doAnnounce) {
+            // RAM para uma conexao TLS so: o MQTT sai enquanto o HTTPS roda (o loop reconecta depois)
+            extern PubSubClient mqttClient;
+            if (mqttClient.connected()) { Serial.println(F("[Cloud] Lite: pausando o MQTT durante o HTTPS")); mqttClient.disconnect(); }
+        }
+#endif
         if (doRespond) {
             StaticJsonDocument<256> body;
             StaticJsonDocument<256> out;
@@ -332,17 +392,17 @@ static void cloud_task_fn(void*) {
             body["accept"] = accept;
             int code = api_post("/device/pairing/respond", body, out);
             String status = out["status"] | "";
-            xSemaphoreTake(cloudMutex, portMAX_DELAY);
+            CLOUD_LOCK();
             resRespondCode = code; resRespondStatus = status; resRespondReady = true;
-            xSemaphoreGive(cloudMutex);
+            CLOUD_UNLOCK();
         } else if (doAnnounce) {
             StaticJsonDocument<128> body;
             StaticJsonDocument<512> out;
             body["localIp"] = localIp;
             unsigned long tA = millis();
             int code = api_post("/device/announce", body, out);
-            Serial.printf("[Cloud] Anuncio HTTPS (tarefa de fundo): %d em %lu ms\n", code, millis() - tA);
-            xSemaphoreTake(cloudMutex, portMAX_DELAY);
+            Serial.printf_P(PSTR("[Cloud] Anuncio HTTPS (tarefa de fundo): %d em %lu ms\n"), code, millis() - tA);
+            CLOUD_LOCK();
             resAnnounceCode = code;
             resMqttReady = out["mqtt"] | false;
             resBound = out["bound"] | true; // servidor antigo nao manda "bound": trata como vinculado
@@ -353,12 +413,23 @@ static void cloud_task_fn(void*) {
             resName = resHasPairing ? String(pairing["deviceName"] | "") : String("");
             resExpiresIn = resHasPairing ? (int)(pairing["expiresIn"] | 120) : 0;
             resAnnounceReady = true;
-            xSemaphoreGive(cloudMutex);
+            CLOUD_UNLOCK();
         }
-    }
 }
 
+#if !defined(ESP8266)
+static void cloud_task_fn(void*) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        cloud_work();
+    }
+}
+#endif
+
 static bool ensure_cloud_task() {
+#if defined(ESP8266)
+    return true;
+#else
     if (cloudTask) return true;
     if (cloudTaskFailed) return false;
     if (!cloudMutex) cloudMutex = xSemaphoreCreateMutex();
@@ -373,29 +444,37 @@ static bool ensure_cloud_task() {
     if (ok != pdPASS || !cloudMutex) {
         cloudTask = nullptr;
         cloudTaskFailed = true;
-        Serial.printf("[Cloud] ERRO: nao foi possivel criar a tarefa de rede (RAM interna livre %u, maior bloco %u).\n",
+        Serial.printf_P(PSTR("[Cloud] ERRO: nao foi possivel criar a tarefa de rede (RAM interna livre %u, maior bloco %u).\n"),
                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return false;
     }
-    Serial.printf("[Cloud] Tarefa de rede pronta (pilha na %s).\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "RAM interna");
+    Serial.printf_P(PSTR("[Cloud] Tarefa de rede pronta (pilha na %s).\n"), heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "RAM interna");
     return true;
+#endif
 }
 
 // OTA propria (substitui o HTTPUpdate do core). O HTTPUpdate, ANTES de pedir o arquivo,
 // le o firmware atual inteiro da flash 3-4 vezes (validacao da imagem + MD5 + SHA-256)
 // so para montar cabecalhos informativos que o servidor nao usa: eram ~20 s parados.
 // Aqui: GET -> confere x-MD5 -> grava em blocos -> Update.end() valida o MD5.
+#if defined(ESP8266)
+static uint8_t otaBuf[1024]; // RAM curta
+#define OTA_ERR() Update.getErrorString()
+static void ota_abort() { Update.end(false); } // nao terminou: descarta (nao ativa a imagem)
+#else
 static uint8_t otaBuf[4096]; // estatico: fora da pilha do loop
+#define OTA_ERR() Update.errorString()
+static void ota_abort() { Update.abort(); }
+#endif
 
 bool cloud_ota_update(const String& url, void (*onProgress)(int current, int total), String* errorOut) {
     auto fail = [&](const String& msg, WiFiClientSecure* c) -> bool {
         char tlsErr[100] = {0};
-        int tlsCode = c ? c->lastError(tlsErr, sizeof(tlsErr)) : 0;
-        Serial.printf("[OTA] Falhou: %s | TLS %d %s | heap interno %u (maior bloco %u) | RSSI %d\n",
+        int tlsCode = c ? tls_last_error(*c, tlsErr, sizeof(tlsErr)) : 0;
+        Serial.printf_P(PSTR("[OTA] Falhou: %s | TLS %d %s | heap interno %u (maior bloco %u) | RSSI %d\n"),
                       msg.c_str(), tlsCode, tlsErr,
-                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                      (unsigned)plat_free_heap(), (unsigned)plat_largest_block(),
                       (int)WiFi.RSSI());
         if (errorOut) *errorOut = msg + (tlsCode ? String(" (TLS: ") + tlsErr + ")" : String(""));
         return false;
@@ -406,11 +485,15 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
     unsigned long t0 = millis();
     TlsPsramScope scope;
     WiFiClientSecure client;
-    client.setCACert(ISRG_ROOT_CAS);
+    cloud_tls_setup(client, 443);
+#if !defined(ESP8266)
     client.setHandshakeTimeout(15);
+#endif
     HTTPClient http;
     http.useHTTP10(true);            // sem chunked encoding
+#if !defined(ESP8266)
     http.setConnectTimeout(15000);
+#endif
     http.setTimeout(20000);          // tolera pausas (gravacao na flash / Wi-Fi oscilando)
     const char* headerKeys[] = {"x-MD5"};
     http.collectHeaders(headerKeys, 1);
@@ -427,11 +510,11 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
     String md5 = http.header("x-MD5");
     if (len <= 0) { http.end(); return fail("tamanho desconhecido", &client); }
     if (md5.length() != 32) { http.end(); return fail("servidor nao enviou o MD5", &client); }
-    Serial.printf("[OTA] Servidor respondeu em %lu ms (%d bytes, md5 %s)\n", tHeaders - t0, len, md5.c_str());
+    Serial.printf_P(PSTR("[OTA] Servidor respondeu em %lu ms (%d bytes, md5 %s)\n"), tHeaders - t0, len, md5.c_str());
 
     unsigned long tBegin0 = millis();
-    if (!Update.begin(len, U_FLASH)) { http.end(); return fail(String("Update.begin: ") + Update.errorString(), &client); }
-    Serial.printf("[OTA] Update.begin %lu ms | TLS do download na %s\n", millis() - tBegin0, scope.active ? "PSRAM" : "RAM interna");
+    if (!Update.begin(len, U_FLASH)) { http.end(); return fail(String("Update.begin: ") + OTA_ERR(), &client); }
+    Serial.printf_P(PSTR("[OTA] Update.begin %lu ms | TLS do download na %s\n"), millis() - tBegin0, scope.active ? "PSRAM" : "RAM interna");
     Update.setMD5(md5.c_str());
     if (onProgress) onProgress(0, len);
 
@@ -454,8 +537,8 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
             if (r > 0) {
                 reads++;
                 if ((int)Update.write(otaBuf, r) != r) {
-                    Update.abort(); http.end();
-                    return fail(String("gravacao: ") + Update.errorString(), &client);
+                    ota_abort(); http.end();
+                    return fail(String("gravacao: ") + OTA_ERR(), &client);
                 }
                 unsigned long c = millis();
                 tWrite += c - b;
@@ -466,7 +549,7 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
                 int pct = (int)(((long long)written * 100) / len);
                 if (pct >= nextReport) {
                     unsigned long el = millis() - tDl0;
-                    Serial.printf("[OTA] %3d%% | %lu ms | %lu KB/s | leitura %lu, flash %lu, MQTT+tela %lu, espera %lu ms (%lu esperas) | %lu leituras, media %lu B | RSSI %d\n",
+                    Serial.printf_P(PSTR("[OTA] %3d%% | %lu ms | %lu KB/s | leitura %lu, flash %lu, MQTT+tela %lu, espera %lu ms (%lu esperas) | %lu leituras, media %lu B | RSSI %d\n"),
                                   pct, el, el ? (unsigned long)written / el : 0, tRead, tWrite, tCallback, tWait, waits,
                                   reads, reads ? (unsigned long)written / reads : 0, (int)WiFi.RSSI());
                     nextReport += 10;
@@ -484,11 +567,11 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
     http.end();
 
     if (written != len) {
-        Update.abort();
+        ota_abort();
         return fail(String("download incompleto (") + written + " de " + len + " bytes)", &client);
     }
-    if (!Update.end()) return fail(String("verificacao: ") + Update.errorString(), &client); // inclui MD5
-    Serial.printf("[OTA] Firmware gravado e conferido (MD5). Resposta %lu ms, download %lu ms, total %lu ms\n",
+    if (!Update.end()) return fail(String("verificacao: ") + OTA_ERR(), &client); // inclui MD5
+    Serial.printf_P(PSTR("[OTA] Firmware gravado e conferido (MD5). Resposta %lu ms, download %lu ms, total %lu ms\n"),
                   tHeaders - t0, tDone - tHeaders, millis() - t0);
     return true;
 }
@@ -511,7 +594,7 @@ const char* cloud_status_text() {
     if (announceInFlight && !lastAnnounceCode) return "anunciando ao servidor";
     if (!lastAnnounceCode) return "aguardando o primeiro anuncio";
     if (lastAnnounceCode == 200) return lastAnnounceBound ? (load_mqtt_flag() ? "vinculada" : "vinculada, preparando MQTT") : "anunciada, aguardando vinculo";
-    snprintf(buf, sizeof(buf), "falha no anuncio (%d)", lastAnnounceCode);
+    snprintf_P(buf, sizeof(buf), PSTR("falha no anuncio (%d)"), lastAnnounceCode);
     return buf;
 }
 
@@ -520,6 +603,12 @@ void cloud_pairing_request_check() { checkRequested = true; }
 void cloud_pairing_respond(bool accept) {
     if (currentPairingId.length()) pendingResponse = accept ? 1 : 0;
 }
+
+#if defined(ESP8266)
+#define CLOUD_KICK() cloud_work()
+#else
+#define CLOUD_KICK() xTaskNotifyGive(cloudTask)
+#endif
 
 void cloud_pairing_loop() {
     get_device_key(); // NVS so aqui no loop principal (a tarefa usa o valor em cache); codigo de vinculo sai daqui
@@ -530,7 +619,7 @@ void cloud_pairing_loop() {
     bool announceReady = false, respondReady = false, mqttReady = false, hasPairing = false, bound = true;
     int announceCode = 0, respondCode = 0, expiresIn = 0;
     String pairingId, email, name, respondStatus;
-    xSemaphoreTake(cloudMutex, portMAX_DELAY);
+    CLOUD_LOCK();
     if (resAnnounceReady) {
         announceReady = true; resAnnounceReady = false;
         announceCode = resAnnounceCode; mqttReady = resMqttReady; hasPairing = resHasPairing;
@@ -541,7 +630,7 @@ void cloud_pairing_loop() {
         respondReady = true; resRespondReady = false;
         respondCode = resRespondCode; respondStatus = resRespondStatus;
     }
-    xSemaphoreGive(cloudMutex);
+    CLOUD_UNLOCK();
 
     if (respondReady) ui_pair_result(respondStatus.c_str(), respondCode > 0);
 
@@ -555,7 +644,7 @@ void cloud_pairing_loop() {
             if (!mqttReady && load_mqtt_flag() && !bound) save_mqtt_flag(false); // chave ainda nao vinculada
             if (mqttReady && !load_mqtt_flag()) {
                 save_mqtt_flag(true);
-                Serial.println("[Cloud] Credencial MQTT propria pronta; reconectando ao broker com ela.");
+                Serial.println(F("[Cloud] Credencial MQTT propria pronta; reconectando ao broker com ela."));
                 extern PubSubClient mqttClient;
                 mqttClient.disconnect(); // o loop reconecta ja com usuario/senha do aparelho
             }
@@ -564,7 +653,7 @@ void cloud_pairing_loop() {
             } else if (pairingId.length() && pairingId != currentPairingId) {
                 currentPairingId = pairingId;
                 pairingExpiresAt = now + (unsigned long)expiresIn * 1000UL;
-                Serial.printf("[Cloud] Pedido de vinculo de %s\n", email.c_str());
+                Serial.printf_P(PSTR("[Cloud] Pedido de vinculo de %s\n"), email.c_str());
                 ui_show_pair_confirm(email.c_str(), name.c_str(), expiresIn);
             }
         } else if (announceCode == 403) {
@@ -572,7 +661,7 @@ void cloud_pairing_loop() {
             // app/site com o codigo de confirmacao da tela; ate la continua tentando devagar.
             keyRejected = true;
             nextAnnounceAt = now + ANNOUNCE_REJECTED_MS;
-            Serial.println("[Cloud] Servidor recusou a chave deste aparelho. No app, vincule de novo com o codigo de confirmacao da tela.");
+            Serial.println(F("[Cloud] Servidor recusou a chave deste aparelho. No app, vincule de novo com o codigo de confirmacao da tela."));
         } else {
             nextAnnounceAt = now + ANNOUNCE_RETRY_MS;
         }
@@ -580,10 +669,10 @@ void cloud_pairing_loop() {
 
     // --- Resposta do usuario na tela -> tarefa ---
     if (pendingResponse != -1 && currentPairingId.length()) {
-        xSemaphoreTake(cloudMutex, portMAX_DELAY);
+        CLOUD_LOCK();
         reqRespond = true; reqPairingId = currentPairingId; reqAccept = pendingResponse == 1;
-        xSemaphoreGive(cloudMutex);
-        xTaskNotifyGive(cloudTask);
+        CLOUD_UNLOCK();
+        CLOUD_KICK();
         pendingResponse = -1;
         currentPairingId = "";
         return;
@@ -600,12 +689,20 @@ void cloud_pairing_loop() {
 
     // TLS valida a data do certificado: so tenta depois do NTP sincronizar (ano >= 2024)
     if (time(nullptr) < 1704067200) return;
+#if BREWW_LITE
+    // Lite: com o MQTT no ar, o anuncio periodico derrubaria a conexao (uma TLS por vez). Vinculado e
+    // conectado, so anuncia quando o servidor pede (pair_request) ou se o MQTT cair.
+    {
+        extern PubSubClient mqttClient;
+        if (!checkRequested && mqttClient.connected() && (long)(now - nextAnnounceAt) >= 0) { nextAnnounceAt = now + ANNOUNCE_INTERVAL_MS; return; }
+    }
+#endif
     if (checkRequested || (long)(now - nextAnnounceAt) >= 0) {
         checkRequested = false;
         announceInFlight = true;
-        xSemaphoreTake(cloudMutex, portMAX_DELAY);
+        CLOUD_LOCK();
         reqAnnounce = true; reqLocalIp = WiFi.localIP().toString();
-        xSemaphoreGive(cloudMutex);
-        xTaskNotifyGive(cloudTask);
+        CLOUD_UNLOCK();
+        CLOUD_KICK();
     }
 }

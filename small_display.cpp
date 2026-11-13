@@ -7,7 +7,7 @@
 #include "board_pins.h"
 #include <Wire.h>
 #include <U8g2lib.h>
-#include <Preferences.h>
+#include "platform.h"
 
 // ---------------------------------------------------------------------------
 // Deteccao
@@ -62,7 +62,7 @@ static void lcd_init() {
 
 static void lcd_line(int row, const char* text) {
     char buf[21];
-    snprintf(buf, sizeof(buf), "%-20s", text);
+    snprintf_P(buf, sizeof(buf), PSTR("%-20s"), text);
     if (strcmp(buf, lcdShadow[row]) == 0) return;
     static const uint8_t rowAddr[4] = {0x00, 0x40, 0x14, 0x54};
     lcd_cmd(0x80 | rowAddr[row]);
@@ -88,7 +88,7 @@ static void ascii_fold(const char* in, char* out, size_t n) {
 // API
 // ---------------------------------------------------------------------------
 const char* small_display_begin() {
-    if (g_pins.sda < 0 || g_pins.scl < 0) { Serial.println("[Tela] I2C desligado nos pinos"); return nullptr; }
+    if (g_pins.sda < 0 || g_pins.scl < 0) { Serial.println(F("[Tela] I2C desligado nos pinos")); return nullptr; }
     Wire.begin(g_pins.sda, g_pins.scl);
     Wire.setClock(400000);
     for (uint8_t a : OLED_ADDRS) if (i2c_present(a)) { kind = KIND_OLED; addr = a; break; }
@@ -104,15 +104,15 @@ const char* small_display_begin() {
         oled->setI2CAddress(addr << 1);
         oled->begin();
         oled->enableUTF8Print();
-        Serial.printf("[Tela] OLED encontrado em 0x%02X (driver %s; mude com: tela sh1106 | tela ssd1306)\n", addr, drv.c_str());
+        Serial.printf_P(PSTR("[Tela] OLED encontrado em 0x%02X (driver %s; mude com: tela sh1106 | tela ssd1306)\n"), addr, drv.c_str());
         return "oled";
     }
     if (kind == KIND_LCD) {
         lcd_init();
-        Serial.printf("[Tela] LCD 20x4 encontrado em 0x%02X\n", addr);
+        Serial.printf_P(PSTR("[Tela] LCD 20x4 encontrado em 0x%02X\n"), addr);
         return "lcd2004";
     }
-    Serial.println("[Tela] Nenhuma tela I2C encontrada (opcional)");
+    Serial.println(F("[Tela] Nenhuma tela I2C encontrada (opcional)"));
     return nullptr;
 }
 
@@ -138,7 +138,7 @@ static void draw_oled(const SmallDisplayState& s) {
         oled->drawUTF8(0, 12, "Atualizando firmware");
         oled->drawFrame(0, 28, 128, 12);
         oled->drawBox(2, 30, (124 * constrain(s.otaPercent, 0, 100)) / 100, 8);
-        snprintf(buf, sizeof(buf), "%d%%  nao desligue", s.otaPercent);
+        snprintf_P(buf, sizeof(buf), PSTR("%d%%  nao desligue"), s.otaPercent);
         oled->drawUTF8(0, 56, buf);
         oled->sendBuffer();
         return;
@@ -171,21 +171,21 @@ static void draw_oled(const SmallDisplayState& s) {
 
     // Temperatura grande
     oled->setFont(u8g2_font_logisoso24_tf);
-    if (isnan(s.temp) || s.temp < -100) snprintf(buf, sizeof(buf), "--.-");
-    else snprintf(buf, sizeof(buf), "%.1f", s.temp);
+    if (isnan(s.temp) || s.temp < -100) snprintf_P(buf, sizeof(buf), PSTR("--.-"));
+    else snprintf_P(buf, sizeof(buf), PSTR("%.1f"), s.temp);
     oled->drawUTF8(0, 42, buf);
     int w = oled->getUTF8Width(buf);
     oled->setFont(u8g2_font_6x12_tf);
     oled->drawUTF8(w + 2, 26, "°C");
 
     // Alvo e rele
-    snprintf(buf, sizeof(buf), "Alvo %.1f°C", s.setpoint);
+    snprintf_P(buf, sizeof(buf), PSTR("Alvo %.1f°C"), s.setpoint);
     oled->drawUTF8(0, 54, buf);
     oled->drawUTF8(128 - oled->getUTF8Width(s.relay), 54, s.relay);
 
     // Rodape: codigo de vinculo tem prioridade (aparelho ainda nao vinculado)
-    if (s.pairCode) snprintf(buf, sizeof(buf), "Codigo: %s", s.pairCode);
-    else snprintf(buf, sizeof(buf), "%s", s.footer ? s.footer : "");
+    if (s.pairCode) snprintf_P(buf, sizeof(buf), PSTR("Codigo: %s"), s.pairCode);
+    else snprintf_P(buf, sizeof(buf), PSTR("%s"), s.footer ? s.footer : "");
     oled->drawUTF8(0, 64, buf);
     oled->sendBuffer();
 }
@@ -197,7 +197,7 @@ static void draw_lcd(const SmallDisplayState& s) {
         int bars = (20 * constrain(s.otaPercent, 0, 100)) / 100;
         char bar[21]; memset(bar, ' ', 20); memset(bar, 0xFF, bars); bar[20] = 0;
         lcd_line(1, bar);
-        snprintf(raw, sizeof(raw), "%d%%", s.otaPercent); lcd_line(2, raw);
+        snprintf_P(raw, sizeof(raw), PSTR("%d%%"), s.otaPercent); lcd_line(2, raw);
         lcd_line(3, "Nao desligue");
         return;
     }
@@ -206,7 +206,7 @@ static void draw_lcd(const SmallDisplayState& s) {
         ascii_fold(s.menuTitle, line, sizeof(line)); lcd_line(0, line);
         ascii_fold(s.menuValue ? s.menuValue : "", line, sizeof(line));
         char centered[24]; int pad = (20 - (int)strlen(line)) / 2; if (pad < 0) pad = 0;
-        snprintf(centered, sizeof(centered), "%*s%s", pad, "", line); lcd_line(1, centered);
+        snprintf_P(centered, sizeof(centered), PSTR("%*s%s"), pad, "", line); lcd_line(1, centered);
         lcd_line(2, "");
         ascii_fold(s.menuHint ? s.menuHint : "", line, sizeof(line)); lcd_line(3, line);
         return;
@@ -220,13 +220,13 @@ static void draw_lcd(const SmallDisplayState& s) {
     }
     const char* net = s.cloud ? "NUVEM" : (s.wifi ? "WIFI" : "OFF");
     ascii_fold(s.modeName, line, sizeof(line));
-    snprintf(raw, sizeof(raw), "%-14s%6s", line, net); lcd_line(0, raw);
-    if (isnan(s.temp) || s.temp < -100) snprintf(raw, sizeof(raw), "Temp: --.-%cC", 0xDF);
-    else snprintf(raw, sizeof(raw), "Temp: %.1f%cC", s.temp, 0xDF);
+    snprintf_P(raw, sizeof(raw), PSTR("%-14s%6s"), line, net); lcd_line(0, raw);
+    if (isnan(s.temp) || s.temp < -100) snprintf_P(raw, sizeof(raw), PSTR("Temp: --.-%cC"), 0xDF);
+    else snprintf_P(raw, sizeof(raw), PSTR("Temp: %.1f%cC"), s.temp, 0xDF);
     lcd_line(1, raw);
-    snprintf(raw, sizeof(raw), "Alvo: %.1f%cC %.6s", s.setpoint, 0xDF, s.relay); lcd_line(2, raw);
-    if (s.pairCode) snprintf(raw, sizeof(raw), "Codigo: %s", s.pairCode);
-    else snprintf(raw, sizeof(raw), "%s", s.footer ? s.footer : "");
+    snprintf_P(raw, sizeof(raw), PSTR("Alvo: %.1f%cC %.6s"), s.setpoint, 0xDF, s.relay); lcd_line(2, raw);
+    if (s.pairCode) snprintf_P(raw, sizeof(raw), PSTR("Codigo: %s"), s.pairCode);
+    else snprintf_P(raw, sizeof(raw), PSTR("%s"), s.footer ? s.footer : "");
     ascii_fold(raw, line, sizeof(line)); lcd_line(3, line);
 }
 

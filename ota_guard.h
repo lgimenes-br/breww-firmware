@@ -4,8 +4,8 @@
 #define OTA_GUARD_H
 
 // Atualizacao segura pelo ar. Uma versao nova (OTA da nuvem, /update ou IDE) comeca "em teste":
-// so vira definitiva depois de ficar 30 s conectada a nuvem. Se travar, reiniciar ou nao conectar
-// em 10 minutos, o bootloader volta sozinho para a versao anterior.
+// so vira definitiva depois de ficar 30 s conectada a nuvem. Dois erros fatais seguidos ou 10 minutos
+// sem conectar voltam para a versao anterior (um erro isolado nao derruba a atualizacao).
 
 #include <Arduino.h>
 
