@@ -37,5 +37,6 @@ WifiSetupState wifi_setup_poll() {
     return state;
 }
 
+bool wifi_setup_connecting() { return state == WIFI_SETUP_CONNECTING && millis() - startedAt < WIFI_SETUP_TIMEOUT_MS + 5000; }
 bool wifi_setup_is_new_network() { return newNetwork; }
 void wifi_setup_reset() { state = WIFI_SETUP_IDLE; }

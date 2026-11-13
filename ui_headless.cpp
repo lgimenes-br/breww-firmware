@@ -83,7 +83,7 @@ static void button_update() {
 
 // ---------------- Serial ----------------
 static void print_help() {
-    Serial.println(F("Comandos: wifi <rede> <senha> | codigo | status | tela sh1106|ssd1306 | rele normal|invertido | pinos | pino <papel> <gpio> | reiniciar"));
+    Serial.println(F("Comandos: wifi <rede> <senha> | codigo | status | redes | tela sh1106|ssd1306 | rele normal|invertido | pinos | pino <papel> <gpio> | reiniciar"));
 }
 
 static void print_status() {
@@ -94,6 +94,8 @@ static void print_status() {
                   WiFi.SSID().c_str(), mqttClient.connected() ? "conectada" : "desconectada");
     if (cloud_pair_code(code)) Serial.printf_P(PSTR("[Status] codigo de confirmacao: %s (ID %s)\n"), code.c_str(), get_device_id().c_str());
     // Diagnostico da instalacao (o assistente do site guarda estas linhas no log)
+    if (WiFi.status() == WL_CONNECTED)
+        Serial.printf_P(PSTR("[Status] Wi-Fi: no %s, canal %d, %d dBm\n"), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (int)WiFi.RSSI());
     Serial.printf_P(PSTR("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n"),
                   sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? "ok" : "sem leitura (reles desligados)",
                   plat_chip_temp(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());
@@ -129,6 +131,17 @@ static void serial_update() {
             else Serial.println(F("[Vinculo] Codigo ainda nao gerado (conecte o Wi-Fi primeiro)"));
         } else if (line == "status") {
             print_status();
+        } else if (line == "redes") {
+            // Nos da rede (mesh): BSSID, canal e sinal de cada um; * = o no em uso
+            Serial.println(F("[Redes] Procurando (todos os canais)..."));
+            int n = WiFi.scanNetworks(false, true);
+            String cur = WiFi.status() == WL_CONNECTED ? WiFi.BSSIDstr() : String("");
+            for (int i = 0; i < n; i++) {
+                Serial.printf_P(PSTR("[Redes] %c %-24s %s  canal %2d  %4d dBm\n"), WiFi.BSSIDstr(i) == cur ? '*' : ' ',
+                                WiFi.SSID(i).c_str(), WiFi.BSSIDstr(i).c_str(), (int)WiFi.channel(i), (int)WiFi.RSSI(i));
+            }
+            if (n <= 0) Serial.println(F("[Redes] Nenhuma rede encontrada"));
+            WiFi.scanDelete();
         } else if (line == "pinos") {
             char buf[160]; pins_to_json(buf, sizeof(buf));
             Serial.printf_P(PSTR("[Pinos] %s\n[Pinos] Papeis: ow dht h c sda scl bup bdn (-1 = sem). Ex.: pino h 25 | pinos padrao\n"), buf);

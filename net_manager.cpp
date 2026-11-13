@@ -18,6 +18,7 @@
 #include "ota_guard.h"
 #include "device_settings.h"
 #include "wifi_portal.h"
+#include "wifi_setup.h"
 #include "board_pins.h"
 #include "i2c_sensors.h"
 #if !BREWW_HAS_LVGL
@@ -674,6 +675,8 @@ static void wifi_roaming_check() {
             lastRoam = millis();
             weakSince = 0;
             WiFi.begin(savedSSID.c_str(), savedPASS.c_str(), channel, bssid);
+            extern unsigned long roamPinnedAt;
+            roamPinnedAt = millis(); // o vigia volta para a rede normal se este no nao conectar
             return;
         }
         Serial.printf_P(PSTR("[WiFi] Sinal fraco (%d dBm), mas nenhum no da mesh e melhor.\n"), cur);
@@ -732,11 +735,40 @@ static void ntp_loop() {
     Serial.printf_P(PSTR("[NTP] Servidor de hora %s\n"), ipBuf[cur]);
 }
 
+// ---------------------------------------------------------------------------
+// Vigia do Wi-Fi. A troca de no da mesh conecta FIXADA no BSSID escolhido; se esse no falhasse, a
+// placa ficava tentando so ele para sempre (DevKit com sinal fraco: ligada, piscando, offline).
+//  - troca de no sem conectar em 20 s -> volta para a rede normal (qualquer no);
+//  - Wi-Fi salvo e 30 s desconectada -> reconecta do zero, a cada 30 s.
+// Nao age enquanto o instalador/portal conecta uma rede nova (wifi_setup).
+// ---------------------------------------------------------------------------
+unsigned long roamPinnedAt = 0;
+static void wifi_watchdog() {
+    static unsigned long downSince = 0, lastKick = 0;
+    if (WiFi.status() == WL_CONNECTED) { downSince = 0; roamPinnedAt = 0; return; }
+    if (isUpdatingOTA || savedSSID.length() == 0 || wifi_setup_connecting()) { downSince = 0; return; }
+    const unsigned long now = millis();
+    if (!downSince) downSince = now;
+    const bool roamFailed = roamPinnedAt && now - roamPinnedAt > 20000;
+    const bool longDown = now - downSince > 30000 && (!lastKick || now - lastKick > 30000);
+    if (!roamFailed && !longDown) return;
+    Serial.printf_P(PSTR("[WiFi] %s: reconectando em \"%s\" (qualquer no)\n"),
+                    roamFailed ? "Troca de no nao conectou" : "Sem Wi-Fi ha 30 s", savedSSID.c_str());
+    char ev[120];
+    snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"wifi_kick\",\"roam\":%d,\"down\":%lu}"), roamFailed ? 1 : 0, (now - downSince) / 1000);
+    diag_report(ev);
+    roamPinnedAt = 0;
+    lastKick = now;
+    WiFi.disconnect();
+    WiFi.begin(savedSSID.c_str(), savedPASS.c_str()); // sem canal/BSSID: o driver escolhe o no
+}
+
 // Perfil do ultimo handle_network (ms), lido pelo detector de travamento do loop
 unsigned long prof_ota = 0, prof_cloud = 0, prof_reconnect = 0, prof_mqttloop = 0, prof_telemetry = 0, prof_web = 0;
 
 void handle_network() {
     prof_ota = prof_cloud = prof_reconnect = prof_mqttloop = prof_telemetry = prof_web = 0;
+    wifi_watchdog();
     if (WiFi.status() != WL_CONNECTED) {
         ota_started = false;
         return; 

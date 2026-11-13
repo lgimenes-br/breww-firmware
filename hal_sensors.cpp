@@ -323,9 +323,11 @@ void read_temperatures() {
         
         // Print serial a cada 5 segs para n flodar
         static unsigned long lastPrint = 0;
-        if(millis() - lastPrint > 5000) {
+        static int lastPrinted = -1;
+        if (deviceCount != lastPrinted || millis() - lastPrint > 60000) { // so na mudanca (ou 1x por minuto)
             Serial.printf_P(PSTR("[Sensores] DS18B20 (Cache ativos): %d\n"), deviceCount);
             lastPrint = millis();
+            lastPrinted = deviceCount;
         }
         
         // Solicita nova leitura do DS18B20 para o proximo ciclo de forma assincrona
@@ -335,7 +337,17 @@ void read_temperatures() {
     
     // Leitura Autodetectavel do DHT22 em um ciclo independente (mais lento)
     i2c_sensors_loop(); // SHT3x/AHT20/BME280: quando presente, fornece a umidade
-    if (dht && !i2c_humidity_active() && millis() - lastDhtRequest >= DHT_REQUEST_INTERVAL) {
+    // DHT22 e opcional: se nunca respondeu neste pino (lastDhtOkMs == 0), para de ler depois de 3
+    // tentativas e avisa uma vez. A busca automatica (a cada 30 s) acha um DHT22 ligado depois e o
+    // use_dht_pin zera a contagem. Ja funcionou e falha agora: segue lendo e avisando (defeito real).
+    const bool dhtNeverOk = lastDhtOkMs == 0;
+    if (dht && dhtNeverOk && dhtFailCount >= 3) {
+        static int8_t notedPin = -2;
+        if (notedPin != g_pins.dht) {
+            notedPin = g_pins.dht;
+            Serial.printf_P(PSTR("[DHT22] Nenhum DHT22 no pino %d (e opcional). Procurando nos pinos livres a cada 30 s.\n"), g_pins.dht);
+        }
+    } else if (dht && !i2c_humidity_active() && millis() - lastDhtRequest >= DHT_REQUEST_INTERVAL) {
         float h = dht->readHumidity();
         float t = dht->readTemperature();
         if (!isnan(h) && !isnan(t)) {
@@ -355,7 +367,7 @@ void read_temperatures() {
         if (millis() - lastDhtPrint > 5000) {
             if (dhtFailCount == 0) {
                 Serial.printf_P(PSTR("[DHT22] OK %.1f%% / %.1fC (pino %d)\n"), h, t, g_pins.dht);
-            } else {
+            } else if (!dhtNeverOk) {
                 Serial.printf_P(PSTR("[DHT22] FALHA: %lu leituras seguidas sem resposta (pino %d). Verifique fiacao DATA, 3.3V/5V, GND e pull-up 10k.\n"),
                               dhtFailCount, g_pins.dht);
             }
