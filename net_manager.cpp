@@ -517,8 +517,9 @@ void init_network() {
     WiFi.mode(WIFI_STA);
     // MDNS.begin("breww"); // Removido para nao conflitar com ArduinoOTA (igual ao codigo antigo!)
     
-    // Configura o fuso horario para o Brasil (UTC-3)
-    configTime(-3 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+    // Fuso horario do Brasil (UTC-3). O SNTP so liga com o Wi-Fi conectado (ntp_loop).
+    setenv("TZ", "<-03>3", 1);
+    tzset();
     
     // TESTE WIZARD: Apagar credenciais antigas para forcar o Wizard
     
@@ -693,6 +694,44 @@ static void wifi_roaming_check() {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Relogio (NTP). Travamento real (core dump da 2.9.7, placa com tela): o SNTP do lwIP resolvia
+// "pool.ntp.org" por DNS e o dns_enqueue criava um socket UDP sem o lock da pilha TCP/IP
+// (assert "Required to lock TCPIP core functionality" em udp_new -> abort). Agora o nome e
+// resolvido aqui, no loop, com WiFi.hostByName (seguro), e o SNTP recebe o IP: com IP o lwIP
+// nao passa pelo dns_enqueue. Liga so com o Wi-Fi conectado e renova o IP a cada 6 h.
+// ---------------------------------------------------------------------------
+static void ntp_loop() {
+    static unsigned long lastConfig = 0;
+    static bool configured = false;
+    // O lwIP guarda o PONTEIRO do nome do servidor: buffers fixos, alternados a cada troca (o que o
+    // SNTP em uso le nunca e reescrito)
+    static char ipBuf[2][16] = {"", ""};
+    static uint8_t cur = 0;
+    if (WiFi.status() != WL_CONNECTED) return;
+    const bool due = !configured || millis() - lastConfig > 6UL * 3600UL * 1000UL ||
+                     (time(nullptr) < 1704067200 && millis() - lastConfig > 60000UL); // sem hora: tenta outro IP a cada 1 min
+    if (!due) return;
+    lastConfig = millis();
+    static const char* const SERVERS[] = {"pool.ntp.org", "time.google.com", "a.st1.ntp.br"};
+    static uint8_t next = 0;
+    IPAddress ip;
+    String chosen;
+    for (uint8_t k = 0; k < 3 && !chosen.length(); k++) {
+        const char* name = SERVERS[(next + k) % 3];
+        if (WiFi.hostByName(name, ip) == 1 && ip != IPAddress((uint32_t)0)) chosen = ip.toString();
+    }
+    next = (next + 1) % 3;
+    if (!chosen.length()) { Serial.println(F("[NTP] DNS sem resposta; tento de novo em 1 min")); return; }
+    if (configured && chosen == ipBuf[cur] && time(nullptr) >= 1704067200) return; // mesmo servidor e hora certa
+    const uint8_t nb = configured ? (uint8_t)(cur ^ 1) : cur;
+    strlcpy(ipBuf[nb], chosen.c_str(), sizeof(ipBuf[nb]));
+    configTime(-3 * 3600, 0, ipBuf[nb]); // IP, nao nome (sem DNS dentro do lwIP)
+    cur = nb;
+    configured = true;
+    Serial.printf_P(PSTR("[NTP] Servidor de hora %s\n"), ipBuf[cur]);
+}
+
 // Perfil do ultimo handle_network (ms), lido pelo detector de travamento do loop
 unsigned long prof_ota = 0, prof_cloud = 0, prof_reconnect = 0, prof_mqttloop = 0, prof_telemetry = 0, prof_web = 0;
 
@@ -749,6 +788,7 @@ void handle_network() {
     }
 #endif
     
+    ntp_loop();
     wifi_roaming_check();
     unsigned long tp = millis();
 #if !BREWW_LITE
