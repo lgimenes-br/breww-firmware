@@ -892,12 +892,13 @@ void mqtt_publish_telemetry() {
     }
     static char payload[1800]; // estatico: fora da pilha do loop
     snprintf(payload, sizeof(payload),
-             "{\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"mods\":%s, \"pins\":%s%s}",
+             "{\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}",
              currentTemp, currentTemp2, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
              (isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado")),
              (long)WiFi.RSSI(), (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
              beerName.c_str(), beerType.c_str(), beerIBU, beerABV, humStr, sensorMacCtrl.c_str(), sensorMac2.c_str(), FW_VERSION, BREWW_BOARD_NAME,
              (relay_heater_inverted() ? 1 : 0) | (relay_cooler_inverted() ? 2 : 0), // bit0 aquecer, bit1 resfriar
+             sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? 1 : 0, // 0 = sem leitura do sensor de controle (reles desligados)
              mods, pinsJson, pinsErr);
 
     if (!mqttClient.publish(topic.c_str(), payload, true) && mqttClient.connected()) {

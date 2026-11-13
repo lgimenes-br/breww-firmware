@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Breww
 #include "hal_relays.h"
 #include "board_pins.h"
+#include "hal_sensors.h"
 #include <Preferences.h>
 #include <AutoPID.h>
 
@@ -168,7 +169,7 @@ void init_relays() {
 }
 
 void process_thermostat() {
-    if (isAutoTuning) {
+    if (isAutoTuning && sensor_fresh(currentMode == MODE_FERM ? 0 : 1)) {
         process_autotune();
         return;
     }
@@ -188,6 +189,23 @@ void process_thermostat() {
         isHeaterOn = false;
         isCoolerOn = false;
         return;
+    }
+
+    // Sem leitura valida do sensor de controle: nada de aquecer ou resfriar "no escuro".
+    // Antes, sem sensor, a temperatura ficava em 0 °C e o modo fermentacao ligava o aquecedor sem parar.
+    {
+        static bool warned = false;
+        if (!sensor_fresh(currentMode == MODE_FERM ? 0 : 1)) {
+            pidOutput = 0;
+            relay_write(g_pins.heater, false);
+            relay_write(g_pins.cooler, false);
+            isHeaterOn = false;
+            isCoolerOn = false;
+            if (isAutoTuning) { isAutoTuning = false; autotuneMsg = "Cancelado: sem sensor"; }
+            if (!warned) { warned = true; Serial.println("[Seguranca] Sem leitura do sensor de controle: reles desligados ate o sensor responder."); }
+            return;
+        }
+        if (warned) { warned = false; Serial.println("[Seguranca] Sensor de controle voltou: controle retomado."); }
     }
 
     // MODO CHOPP (Kegerator)

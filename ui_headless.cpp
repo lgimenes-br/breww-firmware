@@ -21,6 +21,7 @@
 #include "i2c_sensors.h"
 #include "button_menu.h"
 #include "improv_serial.h"
+#include "hal_sensors.h"
 #include <WiFi.h>
 
 // ---------------- Estado mostrado no LED ----------------
@@ -91,7 +92,11 @@ static void print_status() {
                   BREWW_BOARD_NAME, currentMode, currentTemp, currentSetpoint,
                   WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado",
                   WiFi.SSID().c_str(), mqttClient.connected() ? "conectada" : "desconectada");
-    if (cloud_pair_code(code)) Serial.printf("[Status] codigo de confirmacao: %s\n", code.c_str());
+    if (cloud_pair_code(code)) Serial.printf("[Status] codigo de confirmacao: %s (ID %s)\n", code.c_str(), get_device_id().c_str());
+    // Diagnostico da instalacao (o assistente do site guarda estas linhas no log)
+    Serial.printf("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n",
+                  sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? "ok" : "sem leitura (reles desligados)",
+                  temperatureRead(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());
 }
 
 static void serial_update() {

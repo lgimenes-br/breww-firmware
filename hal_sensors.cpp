@@ -259,6 +259,8 @@ static void autodetect_sensors() {
 #endif
 }
 
+static unsigned long lastValidMs[2] = {0, 0}; // ultima leitura valida por slot (sensor_fresh)
+
 void read_temperatures() {
     static unsigned long lastAutodetect = 0;
     // Primeira busca depois de 4 s (DHT22 precisa de ~2 s apos ligar); depois a cada 30 s enquanto faltar sensor
@@ -300,6 +302,7 @@ void read_temperatures() {
             if (slot < 0) continue;
             float temp = sensors.getTempC(sensorAddresses[i]);
             if (temp > -50.0 && temp < 85.0 && temp != DEVICE_DISCONNECTED_C) {
+                lastValidMs[slot == 0 ? 0 : 1] = millis();
                 if (slot == 0) {
                     if (currentTemp == 0.0) currentTemp = temp;
                     else currentTemp = (currentTemp * 0.8) + (temp * 0.2);
@@ -352,6 +355,11 @@ void read_temperatures() {
             lastDhtPrint = millis();
         }
     }
+}
+
+bool sensor_fresh(int slot) {
+    if (slot < 0 || slot > 1 || !lastValidMs[slot]) return false;
+    return millis() - lastValidMs[slot] < SENSOR_STALE_MS;
 }
 
 int ds18b20_count() { return cachedDeviceCount < 0 ? 0 : cachedDeviceCount; }

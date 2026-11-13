@@ -38,6 +38,9 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
 // Pausa o HTTPS de fundo (anuncio/pareamento) durante a OTA
 void cloud_pause_background(bool paused);
 
+// Estado da conversa com a nuvem, em uma frase curta (comando "status" e log da instalacao)
+const char* cloud_status_text();
+
 // Resposta do usuario na tela (Confirmar / Recusar). Processada no proximo loop.
 void cloud_pairing_respond(bool accept);
 

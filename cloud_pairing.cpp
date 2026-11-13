@@ -361,14 +361,24 @@ static void cloud_task_fn(void*) {
 static bool ensure_cloud_task() {
     if (cloudTask) return true;
     if (cloudTaskFailed) return false;
-    cloudMutex = xSemaphoreCreateMutex();
-    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(cloud_task_fn, "cloud", 12288, nullptr, 1, &cloudTask, 0,
-                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!cloudMutex) cloudMutex = xSemaphoreCreateMutex();
+    // Pilha na PSRAM so onde ela existe (placa com tela). DevKit e C3 nao tem PSRAM: a criacao com
+    // MALLOC_CAP_SPIRAM falhava e a placa nunca se anunciava (sem vinculo, sem "Buscar na rede", sem MQTT).
+    BaseType_t ok = pdFAIL;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0) {
+        ok = xTaskCreatePinnedToCoreWithCaps(cloud_task_fn, "cloud", 12288, nullptr, 1, &cloudTask, 0,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (ok != pdPASS) ok = xTaskCreatePinnedToCore(cloud_task_fn, "cloud", 10240, nullptr, 1, &cloudTask, 0); // RAM interna (handshake TLS usa ~7 KB de pilha)
     if (ok != pdPASS || !cloudMutex) {
+        cloudTask = nullptr;
         cloudTaskFailed = true;
-        Serial.println("[Cloud] ERRO: nao foi possivel criar a tarefa de rede.");
+        Serial.printf("[Cloud] ERRO: nao foi possivel criar a tarefa de rede (RAM interna livre %u, maior bloco %u).\n",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return false;
     }
+    Serial.printf("[Cloud] Tarefa de rede pronta (pilha na %s).\n", heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "RAM interna");
     return true;
 }
 
@@ -489,6 +499,21 @@ static int pendingResponse = -1;  // -1 nenhuma, 0 recusar, 1 confirmar
 static String currentPairingId = "";
 static unsigned long pairingExpiresAt = 0;
 static bool keyRejected = false;
+static int lastAnnounceCode = 0;      // 0 = ainda nao anunciou
+static bool lastAnnounceBound = false;
+
+const char* cloud_status_text() {
+    static char buf[64];
+    if (cloudTaskFailed) return "erro: sem memoria para a tarefa de rede";
+    if (WiFi.status() != WL_CONNECTED) return "sem Wi-Fi";
+    if (time(nullptr) < 1704067200) return "aguardando o relogio (NTP)";
+    if (keyRejected) return "chave recusada (vincule de novo com o codigo)";
+    if (announceInFlight && !lastAnnounceCode) return "anunciando ao servidor";
+    if (!lastAnnounceCode) return "aguardando o primeiro anuncio";
+    if (lastAnnounceCode == 200) return lastAnnounceBound ? (load_mqtt_flag() ? "vinculada" : "vinculada, preparando MQTT") : "anunciada, aguardando vinculo";
+    snprintf(buf, sizeof(buf), "falha no anuncio (%d)", lastAnnounceCode);
+    return buf;
+}
 
 void cloud_pairing_request_check() { checkRequested = true; }
 
@@ -497,8 +522,8 @@ void cloud_pairing_respond(bool accept) {
 }
 
 void cloud_pairing_loop() {
+    get_device_key(); // NVS so aqui no loop principal (a tarefa usa o valor em cache); codigo de vinculo sai daqui
     if (!ensure_cloud_task()) return;
-    get_device_key(); // NVS so aqui no loop principal (a tarefa usa o valor em cache)
     unsigned long now = millis();
 
     // --- Resultados da tarefa de rede ---
@@ -522,6 +547,8 @@ void cloud_pairing_loop() {
 
     if (announceReady) {
         announceInFlight = false;
+        lastAnnounceCode = announceCode;
+        lastAnnounceBound = bound;
         if (announceCode == 200) {
             keyRejected = false;
             nextAnnounceAt = now + (bound ? ANNOUNCE_INTERVAL_MS : ANNOUNCE_UNBOUND_MS);
