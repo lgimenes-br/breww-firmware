@@ -237,14 +237,22 @@ void process_thermostat() {
             windowStartTime += pwmWindow;
         }
         
+        // Pulso minimo (rele mecanico, janela >= 10 s): perto do alvo o PID pede pulsos de poucos ms,
+        // que so fazem o rele estalar a cada janela sem aquecer nada. Abaixo do minimo fica desligado
+        // (o termo integral cresce ate valer um pulso de verdade); perto de 100% fica ligado direto.
+        const double minPulse = pwmWindow >= 10000 ? max(1000.0, pwmWindow * 0.05) : 0.0;
+        double duty = pidOutput;
+        if (duty < minPulse) duty = 0;
+        else if (duty > pwmWindow - minPulse) duty = pwmWindow;
+
         // Previne os "tics" (rele piscando em 0% e 100%) filtrando os extremos
-        if (pidOutput >= pwmWindow) {
+        if (duty >= pwmWindow) {
             // Fixo em 100% (Saturado)
             if (!isHeaterOn) {
                 relay_write(g_pins.heater, true);
                 isHeaterOn = true;
             }
-        } else if (pidOutput <= 0) {
+        } else if (duty <= 0) {
             // Fixo em 0%
             if (isHeaterOn) {
                 relay_write(g_pins.heater, false);
@@ -252,7 +260,7 @@ void process_thermostat() {
             }
         } else {
             // PWM Modulado (entre 1% e 99%)
-            if (pidOutput > (now - windowStartTime)) {
+            if (duty > (now - windowStartTime)) {
                 if (!isHeaterOn) {
                     relay_write(g_pins.heater, true);
                     isHeaterOn = true;
