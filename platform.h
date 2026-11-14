@@ -151,6 +151,22 @@ inline const char* plat_chip_family() {
 #endif
 }
 
+// Operacao longa sem pausa (negociacao TLS): no ESP8266 a conta da chave leva 1-3 s sem ceder o
+// processador e o vigia de software (~3,2 s) reiniciava a placa no meio (placa com OLED, 2.10.6). Suspende
+// so o vigia de SOFTWARE; o de hardware (~8 s) continua protegendo contra travamento de verdade.
+inline void plat_long_op_begin() {
+#if defined(ESP8266)
+    ESP.wdtFeed();
+    ESP.wdtDisable();
+#endif
+}
+inline void plat_long_op_end() {
+#if defined(ESP8266)
+    ESP.wdtEnable(0);
+    ESP.wdtFeed();
+#endif
+}
+
 // Radio sempre acordado (menos atraso no MQTT)
 inline void plat_wifi_no_sleep() {
 #if defined(ESP8266)

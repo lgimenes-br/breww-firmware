@@ -350,7 +350,10 @@ boolean reconnectMqtt() {
     cloud_tls_setup(espClientTls, MQTT_TLS_PORT);  // hora certa + buffers (MFLN), com o relogio ja acertado
 #endif
 
-    if (mqttClient.connect(clientId.c_str(), user.c_str(), pass.c_str())) {
+    plat_long_op_begin();
+    const bool mqttOk = mqttClient.connect(clientId.c_str(), user.c_str(), pass.c_str());
+    plat_long_op_end();
+    if (mqttOk) {
         Serial.println(F("MQTT Conectado! (credencial propria, TLS 8883)"));
         // So o proprio topico de comandos. O backend publica cada comando em /command E em
         // /comando (compatibilidade); assinar os dois executava tudo duas vezes (tela
@@ -966,6 +969,11 @@ void handle_network() {
     prof_ota = millis() - tp; tp = millis();
     cloud_pairing_loop();
     prof_cloud = millis() - tp;
+#if defined(ESP8266)
+    // Uma operacao TLS por volta do loop: o anuncio HTTPS acabou de rodar (segundos); a reconexao do MQTT
+    // fica para a proxima volta (o vigia e alimentado ao sair do loop)
+    if (prof_cloud > 1000 && !mqttClient.connected()) { server.handleClient(); return; }
+#endif
 
     static unsigned long mqttDownSince = 0;
     static int mqttAttempts = 0;

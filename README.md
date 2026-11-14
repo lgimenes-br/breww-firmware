@@ -74,7 +74,7 @@ arduino-cli compile \
 
 Outras placas: `-DBREWW_BOARD_S3_HEADLESS` (`esp32:esp32:esp32s3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`),
 `-DBREWW_BOARD_C3_HEADLESS` (`esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc`) e
-`-DBREWW_BOARD_ESP8266_LITE` (`esp8266:esp8266:nodemcuv2:eesz=4M1M`, core `esp8266:esp8266@3.1.2`
+`-DBREWW_BOARD_ESP8266_LITE` (`esp8266:esp8266:nodemcuv2:eesz=4M1M,xtal=160`, core `esp8266:esp8266@3.1.2`
 de `https://arduino.esp8266.com/stable/package_esp8266com_index.json`).
 Sem flag, compila a placa de tela 3,5" (veja o `FQBN` completo no workflow).
 

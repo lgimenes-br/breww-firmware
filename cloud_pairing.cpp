@@ -297,7 +297,9 @@ static int api_post_impl(const char* path, JsonDocument& body, JsonDocument& out
     String payload;
     serializeJson(body, payload);
 
+    plat_long_op_begin();
     int code = http.POST(payload);
+    plat_long_op_end();
     if (code > 0) {
         DeserializationError err = deserializeJson(out, http.getString());
         if (err) out.clear();
@@ -501,7 +503,9 @@ bool cloud_ota_update(const String& url, void (*onProgress)(int current, int tot
     http.collectHeaders(headerKeys, 1);
     if (!http.begin(client, url)) return fail("URL invalida", &client);
 
+    plat_long_op_begin();
     int code = http.GET();
+    plat_long_op_end();
     unsigned long tHeaders = millis();
     if (code != 200) {
         String msg = code > 0 ? String("HTTP ") + code : String("conexao: ") + http.errorToString(code);
