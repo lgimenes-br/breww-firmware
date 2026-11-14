@@ -150,7 +150,6 @@ static BearSSL::X509List* trustAnchors() {
 void cloud_tls_setup(WiFiClientSecure& c, uint16_t port) {
 #if defined(ESP8266)
     if (BearSSL::X509List* ta = trustAnchors()) c.setTrustAnchors(ta);
-    c.setX509Time(time(nullptr));
     static int8_t mfln443 = -1, mfln8883 = -1;
     int8_t& m = port == 443 ? mfln443 : mfln8883;
     if (m < 0 && WiFi.status() == WL_CONNECTED) { // sem rede a sondagem falharia e ficaria gravada como "recusado"
@@ -158,6 +157,9 @@ void cloud_tls_setup(WiFiClientSecure& c, uint16_t port) {
         Serial.printf_P(PSTR("[TLS] Porta %u: fragmento de 1 KB %s\n"), port, m ? "aceito (buffers pequenos)" : "recusado (buffers de 16 KB)");
     }
     if (m == 1) c.setBufferSizes(1024, 1024);
+    // Hora para validar o certificado DEPOIS da sondagem (~1 s): o NTP podia acertar o relogio no meio e o
+    // cliente ficava com a hora 0 ("certificate is expired or not yet valid" na 1a conexao)
+    c.setX509Time(time(nullptr));
 #else
     (void)port;
     c.setCACert(ISRG_ROOT_CAS);

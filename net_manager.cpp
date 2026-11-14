@@ -340,9 +340,6 @@ boolean reconnectMqtt() {
 
     mqttClient.setClient(espClientTls);
     mqttClient.setServer(MQTT_SERVER, MQTT_TLS_PORT);
-#if defined(ESP8266)
-    cloud_tls_setup(espClientTls, MQTT_TLS_PORT); // hora atual para validar o certificado + buffers (MFLN)
-#endif
 
     // Credencial propria do aparelho: o servidor so a cria depois do pareamento confirmado.
     // Antes disso o aparelho nao entra no broker (o pedido de vinculo chega pelo anuncio HTTPS).
@@ -350,6 +347,7 @@ boolean reconnectMqtt() {
     if (!cloud_mqtt_credentials(user, pass)) return false;
 #if defined(ESP8266)
     if (time(nullptr) < 1704067200) return false; // BearSSL valida a data do certificado: espera o NTP
+    cloud_tls_setup(espClientTls, MQTT_TLS_PORT);  // hora certa + buffers (MFLN), com o relogio ja acertado
 #endif
 
     if (mqttClient.connect(clientId.c_str(), user.c_str(), pass.c_str())) {
