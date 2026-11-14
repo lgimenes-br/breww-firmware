@@ -31,6 +31,7 @@
     #include <esp_system.h>
     #include <esp_random.h>
     #include <esp_task_wdt.h>
+    #include <esp_wifi.h>
     #include "mbedtls/md.h"
 #endif
 

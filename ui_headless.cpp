@@ -95,7 +95,7 @@ static void print_status() {
     if (cloud_pair_code(code)) Serial.printf_P(PSTR("[Status] codigo de confirmacao: %s (ID %s)\n"), code.c_str(), get_device_id().c_str());
     // Diagnostico da instalacao (o assistente do site guarda estas linhas no log)
     if (WiFi.status() == WL_CONNECTED)
-        Serial.printf_P(PSTR("[Status] Wi-Fi: no %s, canal %d, %d dBm\n"), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (int)WiFi.RSSI());
+        Serial.printf_P(PSTR("[Status] Wi-Fi: no %s, canal %d, %d dBm | rede salva: %s | nos que recusaram: %d\n"), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (int)WiFi.RSSI(), has_wifi_credentials() ? "sim" : "NAO (nao reconecta apos reiniciar)", wifi_rejected_count());
     Serial.printf_P(PSTR("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n"),
                   control_sensor_ok() ? "ok" : "sem leitura (reles desligados)",
                   plat_chip_temp(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());

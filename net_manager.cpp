@@ -404,6 +404,79 @@ void clear_wifi_credentials() {
     savedPASS = "";
 }
 
+// ---------------------------------------------------------------------------
+// Conexao Wi-Fi: escolha do no numa rede mesh.
+// Caso real (TP-Link Deco, "Mesh Technology"): o roteador guarda, por MAC, em qual no cada aparelho deve
+// ficar e recusa a autenticacao (AUTH_FAIL, 202) nos outros, mesmo insistindo (12 tentativas seguidas) e
+// mesmo em WPA2. Provado trocando o MAC so num teste: o no de -48 dBm aceitou na hora. O firmware nao passa
+// por cima do roteador (o MAC e a identidade do aparelho), mas deixa de perder tempo com isso:
+//  - no que recusou a autenticacao fica fora da escolha por 6 h (lista abaixo, preenchida pelo evento);
+//  - conecta direto no no de sinal mais forte que aceita (busca + BSSID fixo) e, se ele recusar, tenta o
+//    proximo na hora (antes: 30 a 60 s ate o vigia agir, a cada boot e a cada troca de no);
+//  - SAE (WPA3) com os dois metodos de PWE: o WiFi.begin do Arduino zera a configuracao e deixava o metodo
+//    "nao especificado".
+// ---------------------------------------------------------------------------
+struct RejectedNode { uint8_t bssid[6]; unsigned long at; };
+static RejectedNode rejectedNodes[4] = {};
+static const unsigned long REJECT_FOR_MS = 6UL * 3600UL * 1000UL;
+static bool node_rejected(const uint8_t* b) {
+    for (const RejectedNode& r : rejectedNodes)
+        if (r.at && millis() - r.at < REJECT_FOR_MS && memcmp(r.bssid, b, 6) == 0) return true;
+    return false;
+}
+static void node_reject(const uint8_t* b) {
+    int slot = 0;
+    for (int i = 0; i < 4; i++) {
+        if (memcmp(rejectedNodes[i].bssid, b, 6) == 0) { slot = i; break; }
+        if (!rejectedNodes[i].at || rejectedNodes[i].at < rejectedNodes[slot].at) slot = i; // vazio ou o mais antigo
+    }
+    memcpy(rejectedNodes[slot].bssid, b, 6);
+    rejectedNodes[slot].at = millis() ? millis() : 1;
+}
+int wifi_rejected_count() {
+    int n = 0;
+    for (const RejectedNode& r : rejectedNodes) if (r.at && millis() - r.at < REJECT_FOR_MS) n++;
+    return n;
+}
+
+static void wifi_begin_tuned(const char* ssid, const char* pass, int32_t channel = 0, const uint8_t* bssid = nullptr) {
+#if defined(ESP8266)
+    WiFi.begin(ssid, pass, channel, bssid);
+#else
+    WiFi.begin(ssid, pass, channel, bssid, false); // so configura; os ajustes vem antes de conectar
+    wifi_config_t c;
+    if (esp_wifi_get_config(WIFI_IF_STA, &c) == ESP_OK) {
+        c.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+        c.sta.failure_retry_cnt = 2;
+        esp_wifi_set_config(WIFI_IF_STA, &c);
+    }
+    esp_wifi_connect();
+#endif
+}
+
+// Busca a rede (todos os canais, ~2 s) e conecta no no mais forte que nao recusou. Sem no conhecido: o
+// driver escolhe sozinho.
+static void wifi_begin_best(const char* ssid, const char* pass) {
+    int n = WiFi.scanNetworks(false, false);
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) != ssid || node_rejected(WiFi.BSSID(i))) continue;
+        if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
+    }
+    if (best >= 0) {
+        uint8_t bssid[6];
+        memcpy(bssid, WiFi.BSSID(best), 6);
+        const int ch = WiFi.channel(best), rssi = WiFi.RSSI(best);
+        Serial.printf_P(PSTR("[WiFi] Conectando no no %s (%d dBm, canal %d)%s\n"), WiFi.BSSIDstr(best).c_str(), rssi, ch,
+                        wifi_rejected_count() ? " (pulando nos que recusaram)" : "");
+        WiFi.scanDelete();
+        wifi_begin_tuned(ssid, pass, ch, bssid);
+        return;
+    }
+    WiFi.scanDelete();
+    wifi_begin_tuned(ssid, pass);
+}
+
 void attempt_wifi_connection(String ssid, String pass) {
     Serial.printf_P(PSTR("Tentando conectar a: %s\n"), ssid.c_str());
     WiFi.disconnect();
@@ -414,7 +487,7 @@ void attempt_wifi_connection(String ssid, String pass) {
     WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
 #endif
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    wifi_begin_best(ssid.c_str(), pass.c_str());
 }
 
 void start_wifi_scan() {
@@ -526,6 +599,10 @@ void init_network() {
     
     // Tenta carregar as credenciais da memoria
      
+    // Limpeza: marca "wifi_wpa2" de um build de teste (a reserva WPA2 saiu; a recusa era do roteador)
+    preferences.begin("breww", false);
+    if (preferences.isKey("wifi_wpa2")) preferences.remove("wifi_wpa2");
+    preferences.end();
     if(load_wifi_credentials()) {
         attempt_wifi_connection(savedSSID, savedPASS);
     }
@@ -639,14 +716,10 @@ static const unsigned long ROAM_WEAK_MS = 60000;
 static const unsigned long ROAM_COOLDOWN_MS = 10UL * 60UL * 1000UL;
 static const int ROAM_MIN_GAIN_DB = 8;
 
-// No da mesh que recusou a troca: fica fora das trocas por 6 h (antes a placa tentava o mesmo no a cada
-// 10 min e ficava ~25 s offline em cada tentativa)
-static uint8_t roamTarget[6] = {0}, roamBad[6] = {0};
-static unsigned long roamBadAt = 0;
-static bool roam_is_bad(const uint8_t* b) {
-    return roamBadAt && millis() - roamBadAt < 6UL * 3600UL * 1000UL && memcmp(b, roamBad, 6) == 0;
-}
-void roam_mark_failed() { memcpy(roamBad, roamTarget, 6); roamBadAt = millis(); if (!roamBadAt) roamBadAt = 1; }
+// Troca de no que nao conectou (sem AUTH_FAIL registrado, ex.: tempo esgotado): esse no tambem entra na
+// lista dos que recusaram (6 h)
+static uint8_t roamTarget[6] = {0};
+void roam_mark_failed() { node_reject(roamTarget); }
 
 static void wifi_roaming_check() {
 #if defined(ESP8266)
@@ -665,7 +738,7 @@ static void wifi_roaming_check() {
         String curBssid = WiFi.BSSIDstr();
         int best = -1;
         for (int i = 0; i < n; i++) {
-            if (WiFi.SSID(i) != savedSSID || WiFi.BSSIDstr(i) == curBssid || roam_is_bad(WiFi.BSSID(i))) continue;
+            if (WiFi.SSID(i) != savedSSID || WiFi.BSSIDstr(i) == curBssid || node_rejected(WiFi.BSSID(i))) continue;
             if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
         }
         if (best >= 0 && WiFi.RSSI(best) >= cur + ROAM_MIN_GAIN_DB) {
@@ -684,7 +757,7 @@ static void wifi_roaming_check() {
             WiFi.scanDelete();
             lastRoam = millis();
             weakSince = 0;
-            WiFi.begin(savedSSID.c_str(), savedPASS.c_str(), channel, bssid);
+            wifi_begin_tuned(savedSSID.c_str(), savedPASS.c_str(), channel, bssid);
             extern unsigned long roamPinnedAt;
             roamPinnedAt = millis(); // o vigia volta para a rede normal se este no nao conectar
             return;
@@ -759,15 +832,22 @@ void roam_mark_failed();
 // Ex.: 2 AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT (senha/PMF), 201 NO_AP_FOUND, 202 AUTH_FAIL, 205 CONNECTION_FAIL.
 static volatile uint16_t discReason = 0;
 static volatile bool discPending = false;
+static volatile uint8_t discBssid[6] = {0};
 static void wifi_events_begin() {
     static bool started = false;
     if (started) return;
     started = true;
 #if defined(ESP8266)
-    static WiFiEventHandler h = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) { discReason = e.reason; discPending = true; });
+    static WiFiEventHandler h = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) {
+        discReason = e.reason; memcpy((void*)discBssid, e.bssid, 6); discPending = true;
+    });
 #else
     WiFi.onEvent([](WiFiEvent_t ev, WiFiEventInfo_t info) {
-        if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) { discReason = info.wifi_sta_disconnected.reason; discPending = true; }
+        if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            discReason = info.wifi_sta_disconnected.reason;
+            memcpy((void*)discBssid, info.wifi_sta_disconnected.bssid, 6);
+            discPending = true;
+        }
     });
 #endif
 }
@@ -776,6 +856,16 @@ static void wifi_disc_report() {
     discPending = false;
     static unsigned long lastDiag = 0;
     const uint16_t r = discReason;
+    // Autenticacao recusada (202): esse no nao aceita este aparelho (ex.: direcionamento do Deco). Fica fora
+    // da escolha por 6 h e, se ainda nao conectou, ja tenta o proximo no.
+    if (r == 202) {
+        uint8_t b[6];
+        memcpy(b, (const void*)discBssid, 6);
+        const bool known = node_rejected(b);
+        node_reject(b);
+        if (!known) Serial.printf_P(PSTR("[WiFi] No %02X:%02X:%02X:%02X:%02X:%02X recusou este aparelho: fica fora da escolha por 6 h\n"), b[0], b[1], b[2], b[3], b[4], b[5]);
+        if (WiFi.status() != WL_CONNECTED && savedSSID.length() && !isUpdatingOTA) wifi_begin_best(savedSSID.c_str(), savedPASS.c_str());
+    }
 #if defined(ESP8266)
     Serial.printf_P(PSTR("[WiFi] Desconectou (motivo %u)\n"), r);
 #else
@@ -805,11 +895,11 @@ static void wifi_watchdog() {
     char ev[120];
     snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"wifi_kick\",\"roam\":%d,\"down\":%lu}"), roamFailed ? 1 : 0, (now - downSince) / 1000);
     diag_report(ev);
-    if (roamFailed) roam_mark_failed(); // esse no fica fora das trocas por 6 h
+    if (roamFailed) roam_mark_failed(); // esse no fica fora da escolha por 6 h
     roamPinnedAt = 0;
     lastKick = now;
     WiFi.disconnect();
-    WiFi.begin(savedSSID.c_str(), savedPASS.c_str()); // sem canal/BSSID: o driver escolhe o no
+    wifi_begin_best(savedSSID.c_str(), savedPASS.c_str()); // melhor no que aceita (antes: o driver escolhia)
 }
 
 // Perfil do ultimo handle_network (ms), lido pelo detector de travamento do loop
@@ -1051,4 +1141,9 @@ void mqtt_publish_telemetry() {
         }
     }
 }
-bool has_wifi_credentials() { return savedSSID.length() > 0; }
+bool has_wifi_credentials() {
+    // A tela (init_ui) pergunta antes do init_network carregar: le da memoria na primeira vez
+    static bool loaded = false;
+    if (!loaded && savedSSID.length() == 0) { loaded = true; load_wifi_credentials(); }
+    return savedSSID.length() > 0;
+}

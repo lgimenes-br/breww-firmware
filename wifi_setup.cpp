@@ -8,11 +8,17 @@ static const unsigned long WIFI_SETUP_TIMEOUT_MS = 15000;
 static WifiSetupState state = WIFI_SETUP_IDLE;
 static unsigned long startedAt = 0;
 static bool newNetwork = false;
+// Rede nova que nao conectou no prazo: so apaga a senha se continuar sem conectar por mais tempo. Caso real
+// (DevKit numa mesh): o no mais forte recusou (AUTH_FAIL), o driver caiu em outro no e conectou depois dos
+// 15 s; a rede ja tinha sido apagada e, na proxima queda de energia, a placa nao voltava mais.
+static const unsigned long CLEAR_AFTER_MS = 60000;
+static bool clearPending = false;
 
 void wifi_setup_connect_new(const String& ssid, const String& pass) {
     save_wifi_credentials(ssid, pass);
     attempt_wifi_connection(ssid, pass);
     newNetwork = true;
+    clearPending = false;
     startedAt = millis();
     state = WIFI_SETUP_CONNECTING;
 }
@@ -24,15 +30,22 @@ void wifi_setup_track_saved() {
 }
 
 WifiSetupState wifi_setup_poll() {
+    if (clearPending) {
+        if (WiFi.status() == WL_CONNECTED) {
+            clearPending = false;
+            Serial.println(F("[Wi-Fi] Conectou depois do prazo: a rede fica salva"));
+        } else if (millis() - startedAt > CLEAR_AFTER_MS) {
+            clearPending = false;
+            clear_wifi_credentials(); // senha errada ou rede fora de alcance
+            start_wifi_scan();
+        }
+    }
     if (state != WIFI_SETUP_CONNECTING) return state;
     if (WiFi.status() == WL_CONNECTED) {
         state = WIFI_SETUP_CONNECTED;
     } else if (millis() - startedAt > WIFI_SETUP_TIMEOUT_MS) {
         state = WIFI_SETUP_FAILED;
-        if (newNetwork) {
-            clear_wifi_credentials(); // senha errada ou rede fora de alcance
-            start_wifi_scan();
-        }
+        if (newNetwork) clearPending = true; // decide em CLEAR_AFTER_MS (pode conectar ainda)
     }
     return state;
 }

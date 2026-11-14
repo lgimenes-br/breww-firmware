@@ -16,7 +16,7 @@ enum : uint8_t { ERR_NONE = 0x00, ERR_INVALID_RPC = 0x01, ERR_UNKNOWN_RPC = 0x02
 enum : uint8_t { CMD_WIFI_SETTINGS = 0x01, CMD_GET_STATE = 0x02, CMD_GET_INFO = 0x03, CMD_GET_NETWORKS = 0x04 };
 
 static const char HEADER[] = "IMPROV";
-static const unsigned long CONNECT_TIMEOUT_MS = 20000;
+static const unsigned long CONNECT_TIMEOUT_MS = 28000; // mesh: o 1o no pode recusar e o driver tenta outro (o site espera 30 s)
 static const char* NEXT_URL = "https://breww.live/instalar#app"; // botao "Visitar" do instalador
 
 static uint8_t buf[256];

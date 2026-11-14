@@ -30,5 +30,6 @@ void start_wifi_scan();
 int check_wifi_scan(); // Retorna o numero de redes achadas ou -1 se carregando
 String get_scanned_ssid(int i);
 void attempt_wifi_connection(String ssid, String pass);
+int wifi_rejected_count(); // nos da mesh que recusaram este aparelho (fora da escolha por 6 h)
 
 #endif // NET_MANAGER_H
