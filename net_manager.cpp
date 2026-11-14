@@ -639,6 +639,15 @@ static const unsigned long ROAM_WEAK_MS = 60000;
 static const unsigned long ROAM_COOLDOWN_MS = 10UL * 60UL * 1000UL;
 static const int ROAM_MIN_GAIN_DB = 8;
 
+// No da mesh que recusou a troca: fica fora das trocas por 6 h (antes a placa tentava o mesmo no a cada
+// 10 min e ficava ~25 s offline em cada tentativa)
+static uint8_t roamTarget[6] = {0}, roamBad[6] = {0};
+static unsigned long roamBadAt = 0;
+static bool roam_is_bad(const uint8_t* b) {
+    return roamBadAt && millis() - roamBadAt < 6UL * 3600UL * 1000UL && memcmp(b, roamBad, 6) == 0;
+}
+void roam_mark_failed() { memcpy(roamBad, roamTarget, 6); roamBadAt = millis(); if (!roamBadAt) roamBadAt = 1; }
+
 static void wifi_roaming_check() {
 #if defined(ESP8266)
     return; // Lite: sem troca de no (a busca por canal/SSID do ESP32 nao existe aqui)
@@ -656,7 +665,7 @@ static void wifi_roaming_check() {
         String curBssid = WiFi.BSSIDstr();
         int best = -1;
         for (int i = 0; i < n; i++) {
-            if (WiFi.SSID(i) != savedSSID || WiFi.BSSIDstr(i) == curBssid) continue;
+            if (WiFi.SSID(i) != savedSSID || WiFi.BSSIDstr(i) == curBssid || roam_is_bad(WiFi.BSSID(i))) continue;
             if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
         }
         if (best >= 0 && WiFi.RSSI(best) >= cur + ROAM_MIN_GAIN_DB) {
@@ -664,6 +673,7 @@ static void wifi_roaming_check() {
             int channel = WiFi.channel(best);
             uint8_t bssid[6];
             memcpy(bssid, WiFi.BSSID(best), 6);
+            memcpy(roamTarget, bssid, 6);
             String toBssid = WiFi.BSSIDstr(best);
             Serial.printf_P(PSTR("[WiFi] Trocando de no da mesh: %s (%d dBm) -> %s (%d dBm, canal %d)\n"),
                           curBssid.c_str(), cur, toBssid.c_str(), toRssi, channel);
@@ -743,7 +753,45 @@ static void ntp_loop() {
 // Nao age enquanto o instalador/portal conecta uma rede nova (wifi_setup).
 // ---------------------------------------------------------------------------
 unsigned long roamPinnedAt = 0;
+void roam_mark_failed();
+
+// Motivo de cada queda/recusa do Wi-Fi (codigo do 802.11/driver): no serial e no diagnostico remoto.
+// Ex.: 2 AUTH_EXPIRE, 15 4WAY_HANDSHAKE_TIMEOUT (senha/PMF), 201 NO_AP_FOUND, 202 AUTH_FAIL, 205 CONNECTION_FAIL.
+static volatile uint16_t discReason = 0;
+static volatile bool discPending = false;
+static void wifi_events_begin() {
+    static bool started = false;
+    if (started) return;
+    started = true;
+#if defined(ESP8266)
+    static WiFiEventHandler h = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& e) { discReason = e.reason; discPending = true; });
+#else
+    WiFi.onEvent([](WiFiEvent_t ev, WiFiEventInfo_t info) {
+        if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) { discReason = info.wifi_sta_disconnected.reason; discPending = true; }
+    });
+#endif
+}
+static void wifi_disc_report() {
+    if (!discPending) return;
+    discPending = false;
+    static unsigned long lastDiag = 0;
+    const uint16_t r = discReason;
+#if defined(ESP8266)
+    Serial.printf_P(PSTR("[WiFi] Desconectou (motivo %u)\n"), r);
+#else
+    Serial.printf_P(PSTR("[WiFi] Desconectou (motivo %u: %s)\n"), r, WiFi.disconnectReasonName((wifi_err_reason_t)r));
+#endif
+    if (millis() - lastDiag > 60000 || !lastDiag) { // no maximo 1 evento por minuto
+        lastDiag = millis();
+        char ev[120];
+        snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"wifi_disc\",\"reason\":%u,\"pinned\":%d,\"up\":%lu}"), r, roamPinnedAt ? 1 : 0, millis() / 1000);
+        diag_report(ev);
+    }
+}
+
 static void wifi_watchdog() {
+    wifi_events_begin();
+    wifi_disc_report();
     static unsigned long downSince = 0, lastKick = 0;
     if (WiFi.status() == WL_CONNECTED) { downSince = 0; roamPinnedAt = 0; return; }
     if (isUpdatingOTA || savedSSID.length() == 0 || wifi_setup_connecting()) { downSince = 0; return; }
@@ -757,6 +805,7 @@ static void wifi_watchdog() {
     char ev[120];
     snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"wifi_kick\",\"roam\":%d,\"down\":%lu}"), roamFailed ? 1 : 0, (now - downSince) / 1000);
     diag_report(ev);
+    if (roamFailed) roam_mark_failed(); // esse no fica fora das trocas por 6 h
     roamPinnedAt = 0;
     lastKick = now;
     WiFi.disconnect();
@@ -989,7 +1038,7 @@ void mqtt_publish_telemetry() {
              (long)WiFi.RSSI(), (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
              beerName.c_str(), beerType.c_str(), beerIBU, beerABV, humStr, sensorMacCtrl.c_str(), sensorMac2.c_str(), FW_VERSION, BREWW_BOARD_NAME,
              (relay_heater_inverted() ? 1 : 0) | (relay_cooler_inverted() ? 2 : 0), // bit0 aquecer, bit1 resfriar
-             sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? 1 : 0, // 0 = sem leitura do sensor de controle (reles desligados)
+             control_sensor_ok() ? 1 : 0, // 0 = sem leitura do sensor de controle (reles desligados)
              mods, pinsJson, pinsErr);
 
     if (!mqttClient.publish(topic.c_str(), payload, true) && mqttClient.connected()) {

@@ -58,7 +58,7 @@ void start_autotune() {
     isAutoTuning = true;
     tuneState = 1; // 1 = Aquecendo, 2 = Esfriando (inercia)
     tuneCycles = 0;
-    float controlTemp = (currentMode == MODE_FERM) ? currentTemp : currentTemp2;
+    float controlTemp = control_temp();
     maxTemp = controlTemp;
     minTemp = controlTemp;
     cycleStartTime = millis();
@@ -71,7 +71,7 @@ void start_autotune() {
 }
 
 void process_autotune() {
-    float controlTemp = (currentMode == MODE_FERM) ? currentTemp : currentTemp2;
+    float controlTemp = control_temp();
 
     if (controlTemp > maxTemp) maxTemp = controlTemp;
     if (controlTemp < minTemp) minTemp = controlTemp;
@@ -169,12 +169,12 @@ void init_relays() {
 }
 
 void process_thermostat() {
-    if (isAutoTuning && sensor_fresh(currentMode == MODE_FERM ? 0 : 1)) {
+    if (isAutoTuning && control_sensor_ok()) {
         process_autotune();
         return;
     }
 
-    float controlTemp = (currentMode == MODE_FERM) ? currentTemp : currentTemp2;
+    float controlTemp = control_temp();
     
     // Sincronizar variaveis de entrada do PID com o sistema real
     pidInput = controlTemp;
@@ -195,7 +195,7 @@ void process_thermostat() {
     // Antes, sem sensor, a temperatura ficava em 0 °C e o modo fermentacao ligava o aquecedor sem parar.
     {
         static bool warned = false;
-        if (!sensor_fresh(currentMode == MODE_FERM ? 0 : 1)) {
+        if (!control_sensor_ok()) {
             pidOutput = 0;
             relay_write(g_pins.heater, false);
             relay_write(g_pins.cooler, false);

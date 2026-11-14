@@ -8,7 +8,7 @@ float currentTemp2 = 0.0;
 float currentHumidity = NAN; // NAN = sem leitura valida do DHT22 (publicado como null)
 float currentSetpoint = 18.0;
 float finalGravity = 1.010;
-int currentMode = MODE_FERM;
+int currentMode = MODE_GELADEIRA; // placa nova comeca como geladeira (settings_load grava)
 String beerName = "MINHA BREJA";
 String profileStatus = "AGUARDANDO";
 

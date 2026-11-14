@@ -381,4 +381,12 @@ bool sensor_fresh(int slot) {
     return millis() - lastValidMs[slot] < SENSOR_STALE_MS;
 }
 
+int control_slot() {
+    if (currentMode == MODE_FERM) return 0;
+    if (sensor_fresh(1) || !sensor_fresh(0)) return 1;
+    return 0; // um sensor so (slot 0): geladeira/chopp controlam por ele
+}
+float control_temp() { return control_slot() == 0 ? currentTemp : currentTemp2; }
+bool control_sensor_ok() { return sensor_fresh(control_slot()); }
+
 int ds18b20_count() { return cachedDeviceCount < 0 ? 0 : cachedDeviceCount; }

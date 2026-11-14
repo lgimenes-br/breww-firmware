@@ -25,6 +25,11 @@ int ds18b20_count();
 // Leitura valida recente do sensor de controle (slot 0 = fermentador, 1 = geladeira/ambiente).
 // Sem leitura ha 15 s (sensor ausente, solto ou com defeito) o termostato desliga os reles.
 bool sensor_fresh(int slot);
+// Sensor de controle do modo atual: fermentacao usa o slot 0 (na cerveja); geladeira e chopp preferem o
+// slot 1 (ar/geladeira) e, sem leitura nele, usam o 0 (placa com um sensor so funciona em qualquer modo).
+int control_slot();
+float control_temp();
+bool control_sensor_ok();
 const unsigned long SENSOR_STALE_MS = 15000;
 
 #endif // HAL_SENSORS_H

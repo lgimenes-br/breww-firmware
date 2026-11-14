@@ -82,7 +82,17 @@ static void handle_rpc(const uint8_t* d, uint8_t n) {
         const char* s[] = {"Breww", FW_VERSION, chip_family(), name.c_str()};
         send_result(CMD_GET_INFO, s, 4);
     } else if (cmd == CMD_GET_NETWORKS) {
-        int found = WiFi.scanNetworks(false, false); // sincrono (~2 s), so quando o instalador pede
+        // Sincrono (~2 s), so quando o instalador pede. Logo depois de gravar, o portal Wi-Fi abre e dispara
+        // uma busca em segundo plano: a busca daqui voltava -1/0 e o site mostrava "nenhuma rede". Espera a
+        // busca em andamento terminar e tenta de novo uma vez.
+        int found = WiFi.scanNetworks(false, false);
+        if (found <= 0) {
+            unsigned long t0 = millis();
+            while (WiFi.scanComplete() == WIFI_SCAN_RUNNING && millis() - t0 < 8000) delay(50);
+            WiFi.scanDelete();
+            delay(200);
+            found = WiFi.scanNetworks(false, false);
+        }
         for (int k = 0; k < found && k < 20; k++) {
             String ssid = WiFi.SSID(k);
             if (!ssid.length()) continue;

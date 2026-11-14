@@ -36,7 +36,8 @@ void settings_load() {
 
     currentMode = p.getInt("mode", -1);
     if (currentMode == -1) {
-        currentMode = p.getInt("currentMode", 0); // migracao
+        // Migracao da chave antiga; placa nova (gravada do zero) comeca no modo geladeira (decisao do dono)
+        currentMode = p.getInt("currentMode", MODE_GELADEIRA);
         p.putInt("mode", currentMode);
     }
 

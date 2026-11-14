@@ -97,7 +97,7 @@ static void print_status() {
     if (WiFi.status() == WL_CONNECTED)
         Serial.printf_P(PSTR("[Status] Wi-Fi: no %s, canal %d, %d dBm\n"), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), (int)WiFi.RSSI());
     Serial.printf_P(PSTR("[Status] sensor %s | chip %.0f C | RAM livre %u | ligado ha %lu s | nuvem %s\n"),
-                  sensor_fresh(currentMode == MODE_FERM ? 0 : 1) ? "ok" : "sem leitura (reles desligados)",
+                  control_sensor_ok() ? "ok" : "sem leitura (reles desligados)",
                   plat_chip_temp(), (unsigned)ESP.getFreeHeap(), millis() / 1000, cloud_status_text());
 }
 
@@ -229,7 +229,7 @@ static void display_update() {
 
     SmallDisplayState st;
     st.modeName = mode_name(currentMode);
-    st.temp = (currentMode == MODE_FERM) ? currentTemp : currentTemp2; // mesma sonda do controle
+    st.temp = control_temp(); // mesma sonda do controle
     st.setpoint = currentSetpoint;
     st.relay = isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado");
     st.wifi = WiFi.status() == WL_CONNECTED;
