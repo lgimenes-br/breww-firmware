@@ -179,7 +179,7 @@ static void draw_oled(const SmallDisplayState& s) {
     oled->drawUTF8(w + 2, 26, "°C");
 
     // Alvo e rele
-    snprintf_P(buf, sizeof(buf), PSTR("Alvo %.1f°C"), s.setpoint);
+    snprintf_P(buf, sizeof(buf), PSTR("Alvo %.1f°"), s.setpoint); // sem o C: "Sem sensor" cabe ao lado com folga
     oled->drawUTF8(0, 54, buf);
     oled->drawUTF8(128 - oled->getUTF8Width(s.relay), 54, s.relay);
 

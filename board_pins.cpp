@@ -3,6 +3,9 @@
 #include "board_pins.h"
 #include "config.h"
 #include "platform.h"
+#if defined(ESP8266)
+#include <Wire.h>
+#endif
 
 #ifndef PIN_I2C_SDA
 #define PIN_I2C_SDA -1
@@ -103,6 +106,37 @@ bool pins_validate(const BoardPins& p, String& err) {
     return true;
 }
 
+#if defined(ESP8266)
+// Placa ESP8266 com OLED integrado (ex.: HW-364A, "NodeMCU com tela 0,96"): o OLED fica no GPIO14/GPIO12,
+// os mesmos pinos que a NodeMCU comum usa para os sensores. Sem pinos salvos, o boot procura um OLED ali
+// (nas duas ordens, a serigrafia dessas placas varia); achou -> tela ligada e o DS18B20 vai para o D7
+// (GPIO13). Nao achou -> pinos da NodeMCU comum. O mesmo firmware serve para as duas.
+static bool probe_oled(int sda, int scl) {
+    Wire.begin(sda, scl);
+    for (uint8_t a : {(uint8_t)0x3C, (uint8_t)0x3D}) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) return true;
+    }
+    return false;
+}
+static bool detect_oled_board() {
+    const int pairs[2][2] = {{14, 12}, {12, 14}};
+    for (auto& pr : pairs) {
+        if (probe_oled(pr[0], pr[1])) {
+            g_pins.sda = pr[0];
+            g_pins.scl = pr[1];
+            g_pins.oneWire = 13; // D7
+            g_pins.dht = -1;     // sem pino livre seguro sobrando (configuravel pelo app)
+            Serial.printf_P(PSTR("[Pinos] Placa com OLED: tela no SDA %d / SCL %d; DS18B20 no D7 (GPIO13)\n"), pr[0], pr[1]);
+            return true;
+        }
+    }
+    pinMode(12, INPUT); // devolve os pinos aos sensores da NodeMCU comum
+    pinMode(14, INPUT);
+    return false;
+}
+#endif
+
 void pins_load() {
     g_pins = DEFAULTS;
     if (!pins_configurable()) {
@@ -127,6 +161,9 @@ void pins_load() {
     saved.btnUp = p.getChar("pin_bup", -1);
     saved.btnDown = p.getChar("pin_bdn", -1);
     p.end();
+#if defined(ESP8266)
+    if (!has && detect_oled_board()) return; // pinos da placa com OLED
+#endif
     String err;
     if (pins_validate(saved, err)) g_pins = saved;
     else Serial.printf_P(PSTR("[Pinos] Configuracao salva invalida (%s): usando os pinos padrao da placa\n"), err.c_str());

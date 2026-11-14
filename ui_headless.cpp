@@ -23,6 +23,8 @@
 #include "improv_serial.h"
 #include "hal_sensors.h"
 #include "platform.h"
+#include "ispindel.h"
+#include "version.h"
 
 // ---------------- Estado mostrado no LED ----------------
 static bool otaActive = false;
@@ -224,17 +226,29 @@ static void display_update() {
         snprintf_P(footer, sizeof(footer), PSTR("Etapa %d/%d %s"), currentRampStep + 1, numRampSteps, rampSteps[currentRampStep].name);
     else if (currentMode == MODE_CHOPP)
         snprintf_P(footer, sizeof(footer), PSTR("%s"), beerName.c_str());
-    else if (wifi_portal_active() && WiFi.status() != WL_CONNECTED)
-        snprintf_P(footer, sizeof(footer), PSTR("Wi-Fi: %s"), wifi_portal_ssid().c_str());
-    else if (WiFi.status() != WL_CONNECTED)
-        snprintf_P(footer, sizeof(footer), PSTR("Sem Wi-Fi"));
-    else footer[0] = 0;
+    else {
+        // Leituras extras (a conexao ja aparece no canto: OFFLINE / WI-FI / NUVEM): o outro sensor (cerveja
+        // ou ar), a umidade e a densidade do iSpindel recente. Sem nenhuma: a versao (ajuda no suporte).
+        size_t n = 0;
+        footer[0] = 0;
+        const int other = control_slot() ^ 1;
+        if (sensor_fresh(other))
+            n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("%s %.1f°C"), other == 0 ? "Cerveja" : "Ar", other == 0 ? currentTemp : currentTemp2);
+        if (!isnan(currentHumidity) && n < sizeof(footer) - 6)
+            n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("%s%.0f%%"), n ? "  " : "", currentHumidity);
+        const bool spFresh = lastIspindelUpdate && millis() - lastIspindelUpdate < 2UL * 3600UL * 1000UL;
+        if (spFresh && ispindelGravity >= 0.98f && ispindelGravity <= 1.2f && n < sizeof(footer) - 8)
+            n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("%s%.3f"), n ? "  " : "", ispindelGravity);
+        if (!n) snprintf_P(footer, sizeof(footer), PSTR("Breww %s"), FW_VERSION);
+    }
 
     SmallDisplayState st;
     st.modeName = mode_name(currentMode);
-    st.temp = control_temp(); // mesma sonda do controle
+    // Sem leitura do sensor: "--.-" e "Sem sensor" (antes mostrava 0.0, o valor inicial)
+    const bool sensOk = control_sensor_ok();
+    st.temp = sensOk ? control_temp() : NAN; // mesma sonda do controle
     st.setpoint = currentSetpoint;
-    st.relay = isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado");
+    st.relay = !sensOk ? "Sem sensor" : isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado");
     st.wifi = WiFi.status() == WL_CONNECTED;
     st.cloud = mqttClient.connected();
     st.footer = footer;

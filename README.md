@@ -46,6 +46,9 @@ LittleFS com a mesma interface de `Preferences`, BearSSL no lugar do mbedTLS, se
   partição de volta: a imagem nova só é ativada se o MD5 conferir); atualização local pela IDE e pela
   página `/update`; troca de nó em rede mesh.
 - Relés no D1 (GPIO 5) e no D2 (GPIO 4), que não mudam de estado no boot; sensores no D5, D6 ou D7.
+- NodeMCU com telinha OLED integrada (ex.: HW-364A): sem pinos configurados, o boot procura um OLED
+  SSD1306/SH1106 no GPIO14/GPIO12; achando, a tela liga (modo, temperatura, alvo, relé, código de vínculo)
+  e o DS18B20 passa para o D7 (GPIO13). O mesmo firmware serve para as duas placas.
 - Textos de log ficam na flash (`F()`, `PSTR()`, `printf_P`), senão ocupariam quase 20 KB de RAM.
 
 ## Compilar
