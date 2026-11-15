@@ -12,14 +12,17 @@ static DHT* dht = nullptr; // criado no init_sensors (sem DHT configurado = null
 unsigned long lastTempRequest = 0;
 
 // ---------------------------------------------------------------------------
-// Mapeamento DS18B20 por MAC (definido pelo app via "set_sensors")
-//   slot 0 -> currentTemp  (Sensor 1 / controle, "ferm")
-//   slot 1 -> currentTemp2 (Sensor 2 / geladeira, "amb")
-// Sem mapeamento salvo, usa a ordem do barramento (comportamento antigo).
+// Sensores numerados (fw 2.11): ate 4 DS18B20, Sensor 1..4 (slot 0..3), cada um preso ao MAC.
+// O nome ("Cerveja", "Geladeira"...) e so rotulo no app; qual sensor CONTROLA cada modo e uma
+// escolha separada (ctlMap). Compatibilidade: slot 0 = "ferm"/currentTemp, slot 1 = "amb"/currentTemp2.
+// Sem mapeamento salvo, usa a ordem do barramento.
 // ---------------------------------------------------------------------------
 #define MAX_DS18B20 5
-String sensorMacCtrl = "";
-String sensorMac2 = "";
+String sensorMacs[SENSOR_SLOTS];
+String& sensorMacCtrl = sensorMacs[0];
+String& sensorMac2 = sensorMacs[1];
+float sensorTemps[SENSOR_SLOTS] = {NAN, NAN, NAN, NAN};
+int8_t ctlMap[3] = {-1, -1, -1}; // fermentador, geladeira, chopp; -1 = automatico
 
 static DeviceAddress sensorAddresses[MAX_DS18B20];
 static String sensorHex[MAX_DS18B20];
@@ -46,47 +49,80 @@ static String normalize_mac(String mac) {
     return mac;
 }
 
-// Decide qual sensor fisico alimenta cada slot (currentTemp / currentTemp2)
+static bool any_mapping() {
+    for (int s = 0; s < SENSOR_SLOTS; s++) if (sensorMacs[s].length()) return true;
+    return false;
+}
+
+// Decide qual sensor fisico alimenta cada slot
 static void assign_slots(int count) {
-    bool hasMapping = sensorMacCtrl.length() > 0 || sensorMac2.length() > 0;
-    bool slotUsed[2] = {false, false};
+    bool slotUsed[SENSOR_SLOTS] = {false, false, false, false};
     for (int i = 0; i < count; i++) sensorSlot[i] = -1;
 
-    if (!hasMapping) {
-        for (int i = 0; i < count && i < 2; i++) sensorSlot[i] = i;
+    if (!any_mapping()) {
+        for (int i = 0; i < count && i < SENSOR_SLOTS; i++) sensorSlot[i] = i;
         return;
     }
     // 1a passada: sensores mapeados explicitamente
     for (int i = 0; i < count; i++) {
-        if (sensorMacCtrl.length() && sensorHex[i] == sensorMacCtrl) { sensorSlot[i] = 0; slotUsed[0] = true; }
-        else if (sensorMac2.length() && sensorHex[i] == sensorMac2) { sensorSlot[i] = 1; slotUsed[1] = true; }
+        for (int s = 0; s < SENSOR_SLOTS; s++) {
+            if (sensorMacs[s].length() && sensorHex[i] == sensorMacs[s]) { sensorSlot[i] = s; slotUsed[s] = true; break; }
+        }
     }
     // 2a passada: sensores nao mapeados so ocupam slots SEM MAC configurado
     for (int i = 0; i < count; i++) {
         if (sensorSlot[i] != -1) continue;
-        if (!slotUsed[0] && sensorMacCtrl.length() == 0) { sensorSlot[i] = 0; slotUsed[0] = true; }
-        else if (!slotUsed[1] && sensorMac2.length() == 0) { sensorSlot[i] = 1; slotUsed[1] = true; }
+        for (int s = 0; s < SENSOR_SLOTS; s++) {
+            if (!slotUsed[s] && sensorMacs[s].length() == 0) { sensorSlot[i] = s; slotUsed[s] = true; break; }
+        }
     }
 }
 
-void set_sensor_mapping(const String& macCtrl, const String& mac2) {
-    sensorMacCtrl = normalize_mac(macCtrl);
-    sensorMac2 = normalize_mac(mac2);
-    if (sensorMac2 == sensorMacCtrl) sensorMac2 = "";
+static unsigned long lastValidMs[SENSOR_SLOTS] = {0, 0, 0, 0}; // ultima leitura valida por slot (sensor_fresh)
 
+void set_sensor_slots(const String macs[SENSOR_SLOTS]) {
     Preferences p;
     p.begin("breww", false);
-    p.putString("mac_ctrl", sensorMacCtrl);
-    p.putString("mac_2", sensorMac2);
+    for (int s = 0; s < SENSOR_SLOTS; s++) {
+        String m = normalize_mac(macs[s]);
+        for (int k = 0; k < s; k++) if (m.length() && sensorMacs[k] == m) m = ""; // um sensor em um slot so
+        sensorMacs[s] = m;
+        char key[8];
+        snprintf_P(key, sizeof(key), PSTR("s_mac%d"), s);
+        p.putString(key, m);
+        sensorTemps[s] = NAN;
+        lastValidMs[s] = 0;
+    }
+    p.remove("mac_ctrl"); // formato antigo (migrado para s_mac0/s_mac1)
+    p.remove("mac_2");
     p.end();
 
     // Reinicia a media movel para nao misturar leituras de sensores diferentes
     currentTemp = 0.0;
     currentTemp2 = 0.0;
     mappingDirty = true;
-    Serial.printf_P(PSTR("[Sensores] Mapeamento salvo -> Controle: %s | Sensor 2: %s\n"),
-                  sensorMacCtrl.length() ? sensorMacCtrl.c_str() : "(auto)",
-                  sensorMac2.length() ? sensorMac2.c_str() : "(auto)");
+    Serial.printf_P(PSTR("[Sensores] Mapeamento salvo: S1 %s | S2 %s | S3 %s | S4 %s\n"),
+                  sensorMacs[0].length() ? sensorMacs[0].c_str() : "(auto)", sensorMacs[1].length() ? sensorMacs[1].c_str() : "(auto)",
+                  sensorMacs[2].length() ? sensorMacs[2].c_str() : "(auto)", sensorMacs[3].length() ? sensorMacs[3].c_str() : "(auto)");
+}
+
+void set_sensor_mapping(const String& macCtrl, const String& mac2) {
+    String macs[SENSOR_SLOTS] = {macCtrl, mac2, "", ""};
+    set_sensor_slots(macs);
+}
+
+void set_control_map(int ferm, int fridge, int chopp) {
+    const int v[3] = {ferm, fridge, chopp};
+    Preferences p;
+    p.begin("breww", false);
+    for (int m = 0; m < 3; m++) {
+        ctlMap[m] = (v[m] >= 0 && v[m] < SENSOR_SLOTS) ? v[m] : -1;
+        char key[8];
+        snprintf_P(key, sizeof(key), PSTR("ctl%d"), m);
+        p.putChar(key, ctlMap[m]);
+    }
+    p.end();
+    Serial.printf_P(PSTR("[Sensores] Controle: fermentador %d, geladeira %d, chopp %d (-1 = automatico; 0 = Sensor 1)\n"), ctlMap[0], ctlMap[1], ctlMap[2]);
 }
 
 int scan_ds18b20(String macs[], float temps[], int maxCount) {
@@ -136,8 +172,22 @@ void init_sensors() {
 
     Preferences p;
     p.begin("breww", true);
-    sensorMacCtrl = p.getString("mac_ctrl", "");
-    sensorMac2 = p.getString("mac_2", "");
+    for (int k = 0; k < SENSOR_SLOTS; k++) {
+        char key[8];
+        snprintf_P(key, sizeof(key), PSTR("s_mac%d"), k);
+        sensorMacs[k] = p.getString(key, "");
+    }
+    // Firmware anterior a 2.11 guardava so dois (controle e sensor 2)
+    if (!any_mapping()) {
+        sensorMacs[0] = p.getString("mac_ctrl", "");
+        sensorMacs[1] = p.getString("mac_2", "");
+    }
+    for (int m = 0; m < 3; m++) {
+        char key[8];
+        snprintf_P(key, sizeof(key), PSTR("ctl%d"), m);
+        int8_t v = p.getChar(key, -1);
+        ctlMap[m] = (v >= 0 && v < SENSOR_SLOTS) ? v : -1;
+    }
     p.end();
     mappingDirty = true;
 }
@@ -266,8 +316,6 @@ static void autodetect_sensors() {
 #endif
 }
 
-static unsigned long lastValidMs[2] = {0, 0}; // ultima leitura valida por slot (sensor_fresh)
-
 void read_temperatures() {
     static unsigned long lastAutodetect = 0;
     // Primeira busca depois de 4 s (DHT22 precisa de ~2 s apos ligar); depois a cada 30 s enquanto faltar sensor
@@ -309,18 +357,18 @@ void read_temperatures() {
             if (slot < 0) continue;
             float temp = sensors.getTempC(sensorAddresses[i]);
             if (temp > -50.0 && temp < 85.0 && temp != DEVICE_DISCONNECTED_C) {
-                lastValidMs[slot == 0 ? 0 : 1] = millis();
-                if (slot == 0) {
-                    if (currentTemp == 0.0) currentTemp = temp;
-                    else currentTemp = (currentTemp * 0.8) + (temp * 0.2);
-                }
-                else if (slot == 1) {
-                    if (currentTemp2 == 0.0) currentTemp2 = temp;
-                    else currentTemp2 = (currentTemp2 * 0.8) + (temp * 0.2);
-                }
+                lastValidMs[slot] = millis();
+                // media movel por slot (o primeiro valor entra direto)
+                sensorTemps[slot] = isnan(sensorTemps[slot]) ? temp : (sensorTemps[slot] * 0.8f) + (temp * 0.2f);
             }
         }
         
+        // Sem leitura recente, o slot volta a "sem valor" (o app mostra --)
+        for (int k = 0; k < SENSOR_SLOTS; k++) if (!sensor_fresh(k)) sensorTemps[k] = NAN;
+        // Compatibilidade: telas e telemetria antigas leem os dois primeiros
+        currentTemp = isnan(sensorTemps[0]) ? 0.0f : sensorTemps[0];
+        currentTemp2 = isnan(sensorTemps[1]) ? 0.0f : sensorTemps[1];
+
         // Print serial a cada 5 segs para n flodar
         static unsigned long lastPrint = 0;
         static int lastPrinted = -1;
@@ -377,16 +425,24 @@ void read_temperatures() {
 }
 
 bool sensor_fresh(int slot) {
-    if (slot < 0 || slot > 1 || !lastValidMs[slot]) return false;
+    if (slot < 0 || slot >= SENSOR_SLOTS || !lastValidMs[slot]) return false;
     return millis() - lastValidMs[slot] < SENSOR_STALE_MS;
 }
 
+static int mode_index() { return currentMode == MODE_FERM ? 0 : currentMode == MODE_CHOPP ? 2 : 1; }
+
 int control_slot() {
+    // Escolhido pelo usuario para este modo: e ele, mesmo sem leitura (ai os reles ficam desligados,
+    // em vez de controlar por outro sensor sem ninguem saber)
+    const int chosen = ctlMap[mode_index()];
+    if (chosen >= 0) return chosen;
+    // Automatico (regra de antes): fermentacao pelo Sensor 1; geladeira e chopp pelo Sensor 2 e,
+    // sem ele, pelo Sensor 1 (placa com um sensor so funciona em qualquer modo)
     if (currentMode == MODE_FERM) return 0;
     if (sensor_fresh(1) || !sensor_fresh(0)) return 1;
-    return 0; // um sensor so (slot 0): geladeira/chopp controlam por ele
+    return 0;
 }
-float control_temp() { return control_slot() == 0 ? currentTemp : currentTemp2; }
+float control_temp() { const int s = control_slot(); return isnan(sensorTemps[s]) ? 0.0f : sensorTemps[s]; }
 bool control_sensor_ok() { return sensor_fresh(control_slot()); }
 
 int ds18b20_count() { return cachedDeviceCount < 0 ? 0 : cachedDeviceCount; }

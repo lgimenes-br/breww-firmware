@@ -1,0 +1,119 @@
+# Reconstroi os .elf de uma versao ja publicada (mesmos passos do release, sem publicar nada), para
+# decodificar um travamento de uma versao anterior a quando o release passou a anexar os .elf.
+#   gh workflow run elf.yml -f tag=v2.9.7
+name: ELF de uma versao
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag (ex.: v2.9.7)'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Mesmas opcoes de placa do Arduino IDE (build.options.json do IDE)
+  FQBN: esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=4M,PartitionScheme=min_spiffs,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default
+  ESP32_CORE: esp32:esp32@3.3.11
+  ESP8266_CORE: esp8266:esp8266@3.1.2
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag }}
+          path: breww_controller # pasta precisa ter o mesmo nome do .ino
+
+      - name: Versao a partir da tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"; VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag invalida: use vX.Y.Z (ex: v2.1.0)"; exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          cat > breww_controller/version.h <<EOF
+          #ifndef BREWW_VERSION_H
+          #define BREWW_VERSION_H
+          #define FW_VERSION "$VERSION"
+          #endif
+          EOF
+
+      # arduino-cli direto (a action arduino/setup-arduino-cli ainda roda em Node 20)
+      - name: Instalar arduino-cli 1.5.1
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/v1.5.1/install.sh | BINDIR="$HOME/.local/bin" sh -s 1.5.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Core ESP32 e bibliotecas (versoes fixas)
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli config add board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          arduino-cli core update-index
+          arduino-cli core install "$ESP32_CORE"
+          arduino-cli core install "$ESP8266_CORE"
+          arduino-cli lib install \
+            "lvgl@8.4.0" \
+            "GFX Library for Arduino@1.6.7" \
+            "ArduinoJson@7.4.3" \
+            "PubSubClient@2.8" \
+            "OneWire@2.3.8" \
+            "DallasTemperature@4.0.6" \
+            "DHT sensor library@1.4.7" \
+            "Adafruit Unified Sensor@1.1.15" \
+            "AutoPID@1.0.3" \
+            "U8g2@2.36.19"
+          # Configuracao do LVGL usada pelo projeto (fica ao lado das bibliotecas, como no Mac)
+          cp breww_controller/ci/lv_conf.h "$HOME/Arduino/libraries/lv_conf.h"
+
+      - name: Compilar
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --output-dir build breww_controller
+          ls -la build
+          test -f build/breww_controller.ino.bin
+
+      # Placas sem tela grande (build "modular"). O -ota.bin vai para o servidor (um firmware por
+      # placa, escolhido pelo ?board= que o aparelho manda) e os dois vao para a Release.
+      # O -usb.bin (.merged.bin) inclui bootloader e particoes, para gravar uma placa virgem.
+      - name: Compilar placas sem tela
+        run: |
+          build_board() { # $1 = flag da placa, $2 = nome do arquivo, $3 = FQBN
+            arduino-cli compile --fqbn "$3" \
+              --build-property "compiler.cpp.extra_flags=-DBREWW_BOARD_$1" \
+              --build-property "compiler.c.extra_flags=-DBREWW_BOARD_$1" \
+              --output-dir "build-$2" breww_controller
+            cp "build-$2/breww_controller.ino.merged.bin" "breww_controller-${VERSION}-$2-usb.bin"
+            cp "build-$2/breww_controller.ino.bin" "breww_controller-${VERSION}-$2-ota.bin"
+            cp "build-$2/breww_controller.ino.elf" "breww_controller-${VERSION}-$2.elf" # decodificar travamentos
+          }
+          build_board ESP32_DEVKIT esp32-devkit "esp32:esp32:esp32:PartitionScheme=min_spiffs"
+          build_board S3_HEADLESS s3-headless "esp32:esp32:esp32s3:PartitionScheme=min_spiffs,CDCOnBoot=cdc"
+          build_board C3_HEADLESS c3-headless "esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc"
+          if [ -f breww_controller/boards/board_esp8266_lite.h ]; then # tags antigas nao tem o ESP8266
+            # ESP8266 (Lite): o .bin do Arduino ja traz o bootloader e vai em 0x0, entao serve para o USB e para a OTA
+            arduino-cli compile --fqbn "esp8266:esp8266:nodemcuv2:eesz=4M1M,xtal=160" \
+              --build-property "compiler.cpp.extra_flags=-DBREWW_BOARD_ESP8266_LITE" \
+              --build-property "compiler.c.extra_flags=-DBREWW_BOARD_ESP8266_LITE" \
+              --output-dir build-esp8266-lite breww_controller
+            cp build-esp8266-lite/breww_controller.ino.bin "breww_controller-${VERSION}-esp8266-lite-usb.bin"
+            cp build-esp8266-lite/breww_controller.ino.bin "breww_controller-${VERSION}-esp8266-lite-ota.bin"
+            cp build-esp8266-lite/breww_controller.ino.elf "breww_controller-${VERSION}-esp8266-lite.elf"
+          fi
+          ls -la breww_controller-*-usb.bin
+
+      - name: Guardar os .elf
+        run: |
+          mkdir -p elf
+          cp build/breww_controller.ino.elf "elf/breww_controller-${VERSION}-s3-35.elf"
+          for d in build-*; do [ -f "$d/breww_controller.ino.elf" ] && cp "$d/breww_controller.ino.elf" "elf/breww_controller-${VERSION}-${d#build-}.elf"; done
+          ls -la elf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elf-${{ github.event.inputs.tag }}
+          path: elf/*.elf
+          retention-days: 90

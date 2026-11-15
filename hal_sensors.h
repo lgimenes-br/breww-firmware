@@ -14,19 +14,26 @@
 void init_sensors();
 void read_temperatures();
 
-// Mapeamento DS18B20 por MAC (hex de 16 chars, vazio = automatico pela ordem do barramento)
-extern String sensorMacCtrl;
-extern String sensorMac2;
-void set_sensor_mapping(const String& macCtrl, const String& mac2);
+// Sensores numerados: Sensor 1..4 = slot 0..3, cada um preso ao MAC (hex de 16 chars, vazio = automatico)
+#define SENSOR_SLOTS 4
+extern String sensorMacs[SENSOR_SLOTS];
+extern String& sensorMacCtrl; // = sensorMacs[0] (nome antigo)
+extern String& sensorMac2;    // = sensorMacs[1]
+extern float sensorTemps[SENSOR_SLOTS]; // NAN = sem leitura
+// Sensor que controla cada modo: [0] fermentador, [1] geladeira, [2] chopp. -1 = automatico.
+extern int8_t ctlMap[3];
+void set_sensor_slots(const String macs[SENSOR_SLOTS]);
+void set_sensor_mapping(const String& macCtrl, const String& mac2); // formato antigo (slots 1 e 2)
+void set_control_map(int ferm, int fridge, int chopp);
 // Re-enumera o barramento e faz uma leitura fresca. Retorna quantos sensores achou.
 int scan_ds18b20(String macs[], float temps[], int maxCount);
 // Quantos DS18B20 estao no barramento agora (hardware detectado, Fase 2 item 9)
 int ds18b20_count();
-// Leitura valida recente do sensor de controle (slot 0 = fermentador, 1 = geladeira/ambiente).
-// Sem leitura ha 15 s (sensor ausente, solto ou com defeito) o termostato desliga os reles.
+// Leitura valida recente de um slot. Sem leitura ha 15 s (sensor ausente, solto ou com defeito)
+// o termostato desliga os reles se for o sensor de controle.
 bool sensor_fresh(int slot);
-// Sensor de controle do modo atual: fermentacao usa o slot 0 (na cerveja); geladeira e chopp preferem o
-// slot 1 (ar/geladeira) e, sem leitura nele, usam o 0 (placa com um sensor so funciona em qualquer modo).
+// Sensor de controle do modo atual: o escolhido em ctlMap; em automatico, fermentacao pelo Sensor 1 e
+// geladeira/chopp pelo Sensor 2 (sem ele, pelo 1: placa com um sensor so funciona em qualquer modo).
 int control_slot();
 float control_temp();
 bool control_sensor_ok();

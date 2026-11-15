@@ -247,6 +247,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         resp["id"] = mac;
         resp["macCtrl"] = sensorMacCtrl;
         resp["mac2"] = sensorMac2;
+        JsonArray slots = resp.createNestedArray("slots"); // fw 2.11: MAC de cada Sensor 1..4 ("" = livre)
+        for (int k = 0; k < SENSOR_SLOTS; k++) slots.add(sensorMacs[k]);
         JsonArray arrMacs = resp.createNestedArray("macs");
         JsonArray arrSensors = resp.createNestedArray("sensors");
         for (int i = 0; i < count; i++) {
@@ -263,12 +265,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         Serial.printf_P(PSTR("Scan publicado: %s\n"), out);
     }
     else if (strcmp(cmd, "set_sensors") == 0) {
-        String ctrl = doc["macSensorControle"] | "";
-        String m2 = "";
-        if (doc["extraSensors"].is<JsonArray>() && doc["extraSensors"].size() > 0) {
-            m2 = doc["extraSensors"][0]["mac"] | "";
+        if (doc["macs"].is<JsonArray>()) {
+            // fw 2.11: {"macs":["MAC do Sensor 1","MAC do Sensor 2","",""]}
+            String macs[SENSOR_SLOTS];
+            for (int k = 0; k < SENSOR_SLOTS; k++) macs[k] = doc["macs"][k] | "";
+            set_sensor_slots(macs);
+        } else {
+            // Formato antigo: controle + 1o extra
+            String ctrl = doc["macSensorControle"] | "";
+            String m2 = "";
+            if (doc["extraSensors"].is<JsonArray>() && doc["extraSensors"].size() > 0) {
+                m2 = doc["extraSensors"][0]["mac"] | "";
+            }
+            set_sensor_mapping(ctrl, m2);
         }
-        set_sensor_mapping(ctrl, m2);
+        extern unsigned long lastTelemetry;
+        lastTelemetry = 0; // publica ja com o novo mapeamento
+    }
+    else if (strcmp(cmd, "set_control") == 0) {
+        // Qual sensor controla cada modo: {"ferm":0,"fridge":1,"chopp":1} (0 = Sensor 1; -1 = automatico)
+        set_control_map(doc["ferm"] | ctlMap[0], doc["fridge"] | ctlMap[1], doc["chopp"] | ctlMap[2]);
         extern unsigned long lastTelemetry;
         lastTelemetry = 0; // publica ja com o novo mapeamento
     }
@@ -1127,9 +1143,19 @@ void mqtt_publish_telemetry() {
         String esc = pe; esc.replace("\\", "/"); esc.replace("\"", "'");
         snprintf_P(pinsErr, sizeof(pinsErr), PSTR(", \"pinsErr\":\"%s\""), esc.c_str());
     }
-    static char payload[1800]; // estatico: fora da pilha do loop
-    snprintf_P(payload, sizeof(payload), PSTR("{\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}"),
-             currentTemp, currentTemp2, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
+    // fw 2.11: todos os sensores (Sensor 1..4, null = sem leitura), o que controla agora e a escolha por modo
+    char sens[160];
+    {
+        int n = snprintf_P(sens, sizeof(sens), PSTR("\"t\":["));
+        for (int k = 0; k < SENSOR_SLOTS; k++) {
+            if (isnan(sensorTemps[k])) n += snprintf_P(sens + n, sizeof(sens) - n, PSTR("%snull"), k ? "," : "");
+            else n += snprintf_P(sens + n, sizeof(sens) - n, PSTR("%s%.2f"), k ? "," : "", sensorTemps[k]);
+        }
+        snprintf_P(sens + n, sizeof(sens) - n, PSTR("], \"ctl\":%d, \"ctlMap\":[%d,%d,%d], "), control_slot(), ctlMap[0], ctlMap[1], ctlMap[2]);
+    }
+    static char payload[1960]; // estatico: fora da pilha do loop
+    snprintf_P(payload, sizeof(payload), PSTR("{%s\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}"),
+             sens, currentTemp, currentTemp2, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
              (isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado")),
              (long)WiFi.RSSI(), (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
              beerName.c_str(), beerType.c_str(), beerIBU, beerABV, humStr, sensorMacCtrl.c_str(), sensorMac2.c_str(), FW_VERSION, BREWW_BOARD_NAME,

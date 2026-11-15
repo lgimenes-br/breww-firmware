@@ -16,6 +16,7 @@ LV_FONT_DECLARE(lv_font_montserrat_extrabold_48);
 #include <WiFi.h>
 #include "cloud_pairing.h"
 #include "ispindel.h"
+#include "hal_sensors.h" // control_temp(): sensor que controla o modo
 #include "hal_profiles.h"
 #include "device_settings.h"
 #include "fermentation.h"
@@ -2944,13 +2945,14 @@ void ui_update_temperatures() {
     static float last_gravity = -999.0;
 
     if(lbl_temp != NULL && arc_temp != NULL) {
-        if(force_ui_update || currentTemp != last_temp) {
+        const float ctlT = control_temp(); // sensor que controla o modo (escolhido no app)
+        if(force_ui_update || ctlT != last_temp) {
             char buf[16];
-            sprintf(buf, "%.1f", currentTemp);
+            sprintf(buf, "%.1f", ctlT);
             if(lbl_telemetry_temp_unit != NULL) lv_obj_align_to(lbl_telemetry_temp_unit, lbl_telemetry_temp, LV_ALIGN_OUT_RIGHT_BOTTOM, 5, -8);
             lv_label_set_text(lbl_temp, buf);
-            lv_arc_set_value(arc_temp, (int)(currentTemp * 10));
-            last_temp = currentTemp;
+            lv_arc_set_value(arc_temp, (int)(ctlT * 10));
+            last_temp = ctlT;
         }
     } else {
         last_temp = -999.0;
@@ -3141,13 +3143,14 @@ void ui_update_temperatures() {
 
     // Updates for Choppeira
     static float last_chopp_temp = -999.0;
-    if(lbl_chopp_temp != NULL && currentTemp2 > -50.0) {
-        if(force_ui_update || currentTemp2 != last_chopp_temp) {
+    if(lbl_chopp_temp != NULL) {
+        const float ctlT = control_temp(); // sensor que controla o modo (escolhido no app)
+        if(force_ui_update || ctlT != last_chopp_temp) {
             char buf[16];
-            sprintf(buf, "%.1f", currentTemp2);
+            sprintf(buf, "%.1f", ctlT);
             lv_label_set_text(lbl_chopp_temp, buf);
             if(lbl_chopp_temp_unit != NULL) lv_obj_align_to(lbl_chopp_temp_unit, lbl_chopp_temp, LV_ALIGN_OUT_RIGHT_BOTTOM, 5, -8);
-            last_chopp_temp = currentTemp2;
+            last_chopp_temp = ctlT;
         }
     } else { last_chopp_temp = -999.0; }
     
