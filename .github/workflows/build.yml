@@ -40,7 +40,7 @@ jobs:
             fqbn: esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,USBMode=hwcdc,CDCOnBoot=cdc
     name: ${{ matrix.board }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: breww_controller # pasta precisa ter o mesmo nome do .ino
 
