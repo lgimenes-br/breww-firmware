@@ -23,7 +23,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.inputs.tag }}
           path: breww_controller # pasta precisa ter o mesmo nome do .ino
@@ -70,6 +70,8 @@ jobs:
             "U8g2@2.36.19"
           # Configuracao do LVGL usada pelo projeto (fica ao lado das bibliotecas, como no Mac)
           cp breww_controller/ci/lv_conf.h "$HOME/Arduino/libraries/lv_conf.h"
+          # OneWire 2.3.8 nao conhece o ESP32-P4 (placa p4-7)
+          if [ -f breww_controller/ci/patch_onewire_p4.py ]; then python3 breww_controller/ci/patch_onewire_p4.py "$HOME/Arduino/libraries/OneWire"; fi
 
       - name: Compilar
         run: |
@@ -94,6 +96,7 @@ jobs:
           build_board ESP32_DEVKIT esp32-devkit "esp32:esp32:esp32:PartitionScheme=min_spiffs"
           build_board S3_HEADLESS s3-headless "esp32:esp32:esp32s3:PartitionScheme=min_spiffs,CDCOnBoot=cdc"
           build_board C3_HEADLESS c3-headless "esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=cdc"
+          if [ -f breww_controller/boards/board_p4_7.h ]; then build_board P4_7 p4-7 "esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,USBMode=hwcdc,CDCOnBoot=cdc"; fi # tags antigas nao tem o 7"
           if [ -f breww_controller/boards/board_esp8266_lite.h ]; then # tags antigas nao tem o ESP8266
             # ESP8266 (Lite): o .bin do Arduino ja traz o bootloader e vai em 0x0, entao serve para o USB e para a OTA
             arduino-cli compile --fqbn "esp8266:esp8266:nodemcuv2:eesz=4M1M,xtal=160" \
@@ -112,7 +115,7 @@ jobs:
           cp build/breww_controller.ino.elf "elf/breww_controller-${VERSION}-s3-35.elf"
           for d in build-*; do [ -f "$d/breww_controller.ino.elf" ] && cp "$d/breww_controller.ino.elf" "elf/breww_controller-${VERSION}-${d#build-}.elf"; done
           ls -la elf
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: elf-${{ github.event.inputs.tag }}
           path: elf/*.elf

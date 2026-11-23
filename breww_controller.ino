@@ -19,6 +19,11 @@
 
 void setup() {
     Serial.begin(115200);
+#if defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE == 1 && ARDUINO_USB_CDC_ON_BOOT
+    // USB do chip (S3/P4): ligada a um computador que nao esta lendo a porta, cada mensagem esperava ate
+    // 2 s e travava o loop (tela e touch). Sem espera: o que nao couber no buffer e descartado.
+    Serial.setTxTimeoutMs(0);
+#endif
     Serial.println(F("\n--- Breww Controller V2.0 ---"));
     ota_guard_begin(); // versao nova em teste? (atualizacao segura pelo ar)
     crash_report_check(); // erro fatal no boot anterior? (vai para o diagnostico remoto)
@@ -43,10 +48,11 @@ void setup() {
 // (Comando MQTT que chega durante um travamento so e processado quando o loop volta.)
 extern unsigned long prof_ota, prof_cloud, prof_reconnect, prof_mqttloop, prof_telemetry, prof_web;
 
+#define LAG_REPORT_MS 300
 void loop() {
     unsigned long t0 = millis();
     handle_network();
-    ota_guard_loop(mqttClient.connected());
+    ota_guard_loop(mqtt_online());
     settings_loop(); // grava alteracoes pendentes (debounce)
     unsigned long tNet = millis() - t0;
     unsigned long tSens = 0, tCtrl = 0, tUi = 0;
@@ -64,7 +70,7 @@ void loop() {
     }
 
     unsigned long total = millis() - t0;
-    if (total > 300 && !isUpdatingOTA) {
+    if (total > LAG_REPORT_MS && !isUpdatingOTA) {
         Serial.printf_P(PSTR("[LAG] loop %lu ms | rede %lu (reconexao MQTT %lu, mqtt.loop %lu, telemetria %lu, cloud %lu, ota %lu, web %lu) | sensores %lu | controle %lu | tela %lu | RSSI %d\n"),
                       total, tNet, prof_reconnect, prof_mqttloop, prof_telemetry, prof_cloud, prof_ota, prof_web,
                       tSens, tCtrl, tUi, (int)WiFi.RSSI());

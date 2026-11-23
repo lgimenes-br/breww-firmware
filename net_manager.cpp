@@ -15,6 +15,7 @@
 #endif
 #include "hal_relays.h"
 #include "cloud_pairing.h"
+#include <atomic>
 #include "ota_guard.h"
 #include "device_settings.h"
 #include "wifi_portal.h"
@@ -25,6 +26,9 @@
 #include "small_display.h"
 #endif
 #include "version.h"
+#if defined(BREWW_HAS_ETH) && BREWW_HAS_ETH
+#include <ETH.h>
+#endif
 
 WiFiClientSecure espClientTls; // MQTT com TLS (padrao)
 PubSubClient mqttClient(espClientTls);
@@ -58,7 +62,7 @@ static void publish_ota_status(const char* stage, int progress, int attempt = 0,
     lastStage = stage;
     lastProgress = progress;
     lastPublishMs = millis();
-    if (!mqttClient.connected()) return;
+    if (!mqtt_online()) return;
     StaticJsonDocument<256> doc;
     doc["stage"] = stage;
     doc["progress"] = progress;
@@ -66,7 +70,7 @@ static void publish_ota_status(const char* stage, int progress, int attempt = 0,
     if (error && error[0]) doc["error"] = error;
     char payload[256];
     serializeJson(doc, payload, sizeof(payload));
-    String mac = WiFi.macAddress();
+    String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
     mac.replace(":", "");
     mqttClient.publish(("brewbrother/" + mac + "/ota").c_str(), payload, false);
 }
@@ -90,7 +94,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         String target = (a >= 0 && b > a) ? t.substring(a + 1, b) : "";
         target.replace(":", "");
         target.toUpperCase();
-        String myMac = WiFi.macAddress();
+        String myMac = get_device_id();
         myMac.replace(":", "");
         myMac.toUpperCase();
         if (target.length() && target != myMac && target != "GLOBAL") {
@@ -239,7 +243,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         float temps[5];
         int count = scan_ds18b20(macs, temps, 5);
 
-        String mac = WiFi.macAddress();
+        String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
         mac.replace(":", "");
 
         StaticJsonDocument<768> resp;
@@ -349,13 +353,39 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 // Transporte do MQTT: sempre TLS na 8883 (a 1883 sem criptografia fica so dentro do servidor,
 // fechada para a internet). Nao ha mais queda para conexao sem criptografia.
 
-boolean reconnectMqtt() {
-    String mac = WiFi.macAddress();
-    mac.replace(":", "");
-    String clientId = "Breww_" + mac;
+// ---------------------------------------------------------------------------
+// Conexao ao broker. O connect() com TLS leva ate ~18 s quando o servidor nao responde (TCP + handshake);
+// no loop, isso parava sensores, controle e tela a cada tentativa (servidor fora do ar por 13 min em
+// 19/11: 45 tentativas, placa quase toda parada). Agora, no ESP32, so o connect() roda na tarefa de
+// fundo; o loop prepara as credenciais antes e trata o resultado depois. Enquanto a tarefa conecta,
+// ela e a dona do mqttClient: o resto do codigo pergunta mqtt_online(), nunca mqttClient.connected().
+// No ESP8266 (sem tarefas) continua no loop, com intervalo crescente entre as tentativas.
+// ---------------------------------------------------------------------------
+#if defined(ESP8266)
+// Sem tarefas paralelas: um bool comum basta (o lx106 nao tem as operacoes atomicas de 1 byte)
+struct JobFlag {
+    bool v = false;
+    bool load() const { return v; }
+    void store(bool x) { v = x; }
+    bool exchange(bool x) { const bool o = v; v = x; return o; }
+};
+#else
+typedef std::atomic<bool> JobFlag;
+#endif
+static JobFlag mqttJobBusy; // tarefa de fundo usando o mqttClient (comeca false)
+static JobFlag mqttJobDone; // resultado pronto para o loop
+static bool mqttJobOk = false;
+static int mqttJobState = 0;
+static unsigned long mqttJobMs = 0;
+static char mqttJobTlsErr[100];
+static char mqttJobClientId[40], mqttJobUser[40], mqttJobPass[80], mqttJobTopic[64];
 
-    mqttClient.setClient(espClientTls);
-    mqttClient.setServer(MQTT_SERVER, MQTT_TLS_PORT);
+bool mqtt_online() { return !mqttJobBusy.load() && mqttClient.connected(); }
+
+// No loop: credenciais e destino. false = ainda nao da para conectar.
+static bool mqtt_prepare() {
+    String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
+    mac.replace(":", "");
 
     // Credencial propria do aparelho: o servidor so a cria depois do pareamento confirmado.
     // Antes disso o aparelho nao entra no broker (o pedido de vinculo chega pelo anuncio HTTPS).
@@ -365,34 +395,39 @@ boolean reconnectMqtt() {
     if (time(nullptr) < 1704067200) return false; // BearSSL valida a data do certificado: espera o NTP
     cloud_tls_setup(espClientTls, MQTT_TLS_PORT);  // hora certa + buffers (MFLN), com o relogio ja acertado
 #endif
+    snprintf(mqttJobClientId, sizeof(mqttJobClientId), "Breww_%s", mac.c_str());
+    strlcpy(mqttJobUser, user.c_str(), sizeof(mqttJobUser));
+    strlcpy(mqttJobPass, pass.c_str(), sizeof(mqttJobPass));
+    // So o proprio topico de comandos. O backend publica cada comando em /command E em
+    // /comando (compatibilidade); assinar os dois executava tudo duas vezes (tela
+    // reconstruida e flash gravada em dobro a cada troca de modo).
+    snprintf(mqttJobTopic, sizeof(mqttJobTopic), "brewbrother/%s/command", mac.c_str());
 
+    mqttClient.setClient(espClientTls);
+    mqttClient.setServer(MQTT_SERVER, MQTT_TLS_PORT);
+    return true;
+}
+
+// Na tarefa de fundo (ou no loop, sem ela): so mexe no mqttClient e nos campos mqttJob*.
+static void mqtt_connect_job() {
+    const unsigned long t0 = millis();
     plat_long_op_begin();
-    const bool mqttOk = mqttClient.connect(clientId.c_str(), user.c_str(), pass.c_str());
+    const bool ok = mqttClient.connect(mqttJobClientId, mqttJobUser, mqttJobPass);
     plat_long_op_end();
-    if (mqttOk) {
-        Serial.println(F("MQTT Conectado! (credencial propria, TLS 8883)"));
-        // So o proprio topico de comandos. O backend publica cada comando em /command E em
-        // /comando (compatibilidade); assinar os dois executava tudo duas vezes (tela
-        // reconstruida e flash gravada em dobro a cada troca de modo).
-        mqttClient.subscribe(("brewbrother/" + mac + "/command").c_str());
-    } else {
-        int st = mqttClient.state();
-        Serial.printf_P(PSTR("MQTT falhou (state %d, TLS 8883)\n"), st);
-        if (st == MQTT_CONNECT_FAILED) {
-            char tlsErr[100] = {0};
+    if (ok) mqttClient.subscribe(mqttJobTopic);
+    mqttJobState = mqttClient.state();
+    mqttJobTlsErr[0] = 0;
+    if (!ok && mqttJobState == MQTT_CONNECT_FAILED) {
 #if defined(ESP8266)
-            espClientTls.getLastSSLError(tlsErr, sizeof(tlsErr));
+        espClientTls.getLastSSLError(mqttJobTlsErr, sizeof(mqttJobTlsErr));
 #else
-            espClientTls.lastError(tlsErr, sizeof(tlsErr));
+        espClientTls.lastError(mqttJobTlsErr, sizeof(mqttJobTlsErr));
 #endif
-            Serial.printf_P(PSTR("[MQTT] TLS: %s\n"), tlsErr);
-        }
-        // 4 = usuario/senha invalidos, 5 = nao autorizado
-        if ((st == MQTT_CONNECT_BAD_CREDENTIALS || st == MQTT_CONNECT_UNAUTHORIZED)) {
-            cloud_mqtt_credentials_rejected();
-        }
     }
-    return mqttClient.connected();
+    mqttJobOk = ok && mqttClient.connected();
+    mqttJobMs = millis() - t0;
+    mqttJobDone.store(true);
+    mqttJobBusy.store(false); // por ultimo: devolve o mqttClient ao loop
 }
 
 bool load_wifi_credentials() {
@@ -471,10 +506,8 @@ static void wifi_begin_tuned(const char* ssid, const char* pass, int32_t channel
 #endif
 }
 
-// Busca a rede (todos os canais, ~2 s) e conecta no no mais forte que nao recusou. Sem no conhecido: o
-// driver escolhe sozinho.
-static void wifi_begin_best(const char* ssid, const char* pass) {
-    int n = WiFi.scanNetworks(false, false);
+// Escolhe, entre os n resultados da busca, o no mais forte que nao recusou e conecta (n < 0: o driver escolhe).
+static void wifi_connect_best_of(int n, const char* ssid, const char* pass) {
     int best = -1;
     for (int i = 0; i < n; i++) {
         if (WiFi.SSID(i) != ssid || node_rejected(WiFi.BSSID(i))) continue;
@@ -494,6 +527,40 @@ static void wifi_begin_best(const char* ssid, const char* pass) {
     wifi_begin_tuned(ssid, pass);
 }
 
+// Busca a rede (todos os canais, ~2 s, segurando o loop) e conecta no melhor no. Usada na configuracao
+// do Wi-Fi; o vigia usa a versao em segundo plano abaixo.
+static void wifi_begin_best(const char* ssid, const char* pass) {
+    wifi_connect_best_of(WiFi.scanNetworks(false, false), ssid, pass);
+}
+
+#if defined(ESP8266)
+#define WIFI_RECONNECT_BEST() wifi_begin_best(savedSSID.c_str(), savedPASS.c_str())
+static void wifi_best_scan_poll() {}
+#else
+// Mesma escolha com a busca em segundo plano: sem Wi-Fi, o vigia tentava a cada 30 s e cada busca parava
+// sensores, controle e tela por ~2-3 s.
+static bool bestScanPending = false;
+static bool bestScanSetup = false; // busca pedida pela configuracao do Wi-Fi (ou pelo boot): nao descartar
+static void wifi_begin_best_async() {
+    if (bestScanPending) return;
+    if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return; // outra busca em andamento (tela de Wi-Fi): espera
+    if (WiFi.scanNetworks(true, false) == WIFI_SCAN_RUNNING) bestScanPending = true;
+    else wifi_begin_tuned(savedSSID.c_str(), savedPASS.c_str()); // nao deu para buscar: o driver escolhe
+}
+static void wifi_best_scan_poll() {
+    if (!bestScanPending) return;
+    const int n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) return;
+    bestScanPending = false;
+    const bool forSetup = bestScanSetup;
+    bestScanSetup = false;
+    // Ja voltou sozinho, ou a pessoa esta configurando outra rede / atualizando: so descarta a busca
+    if (WiFi.status() == WL_CONNECTED || savedSSID.length() == 0 || (wifi_setup_connecting() && !forSetup) || isUpdatingOTA || net_eth_up()) { WiFi.scanDelete(); return; }
+    wifi_connect_best_of(n, savedSSID.c_str(), savedPASS.c_str());
+}
+#define WIFI_RECONNECT_BEST() wifi_begin_best_async()
+#endif
+
 void attempt_wifi_connection(String ssid, String pass) {
     Serial.printf_P(PSTR("Tentando conectar a: %s\n"), ssid.c_str());
     WiFi.disconnect();
@@ -503,6 +570,18 @@ void attempt_wifi_connection(String ssid, String pass) {
     // Varre todos os canais e escolhe o no com melhor sinal.
     WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
     WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    // Busca em segundo plano (o vigia termina e conecta): a busca sincrona travava a tela ~3 s no assistente
+    // de Wi-Fi (bancada, placa de 7"). Usa savedSSID/savedPASS, que ja sao esta rede (salva antes / boot).
+    if (ssid == savedSSID && pass == savedPASS) {
+        bestScanPending = false;
+        if (WiFi.scanComplete() != WIFI_SCAN_RUNNING && WiFi.scanNetworks(true, false) == WIFI_SCAN_RUNNING) {
+            bestScanPending = true;
+            bestScanSetup = true;
+        } else {
+            wifi_begin_tuned(ssid.c_str(), pass.c_str()); // busca da tela ainda rodando: o driver escolhe
+        }
+        return;
+    }
 #endif
     wifi_begin_best(ssid.c_str(), pass.c_str());
 }
@@ -566,7 +645,7 @@ void handleRoot() {
     html += F("<p>Seu sistema de controle de fermentação está <b>ONLINE</b>.</p>");
     html += F("<hr style=\"border-color:#222; margin:30px 0;\">");
     html += F("<p style=\"font-size:0.9rem;color:#888;\">Para enviar dados do seu iSpindel, configure-o com as seguintes rotas:</p>");
-    html += F("<div class=\"code\">Server Address: breww.local<br>Server URI: /ispindel</div>");
+    html += "<div class=\"code\">Server Address: " + net_hostname() + ".local<br>Server URI: /ispindel</div>";
     html += F("</div></body></html>");
     server.send(200, "text/html", html);
 }
@@ -601,11 +680,88 @@ void handleIspindel() {
     server.send(200, "text/plain", "OK");
 }
 
+// ---------------------------------------------------------------------------
+// Rede cabeada (placas com RJ45). Com o cabo ligado e IP recebido, o cabo vira a rota padrao (o
+// Wi-Fi continua como reserva, se configurado); sem o cabo, tudo volta ao Wi-Fi sozinho.
+// ---------------------------------------------------------------------------
+#if defined(BREWW_HAS_ETH) && BREWW_HAS_ETH
+static volatile bool ethUp = false;
+static void eth_begin() {
+    Network.onEvent([](arduino_event_id_t ev, arduino_event_info_t) {
+        switch (ev) {
+            case ARDUINO_EVENT_ETH_START:
+                ETH.setHostname(net_hostname().c_str());
+                break;
+            case ARDUINO_EVENT_ETH_CONNECTED:
+                Serial.println(F("[Rede] Cabo conectado; pedindo IP"));
+                break;
+            case ARDUINO_EVENT_ETH_GOT_IP:
+                ethUp = true;
+                ETH.setDefault();
+                Serial.printf_P(PSTR("[Rede] Cabo com IP %s (rede cabeada em uso)\n"), ETH.localIP().toString().c_str());
+                break;
+            case ARDUINO_EVENT_ETH_LOST_IP:
+            case ARDUINO_EVENT_ETH_DISCONNECTED:
+            case ARDUINO_EVENT_ETH_STOP:
+                if (ethUp) {
+                    ethUp = false;
+                    WiFi.STA.setDefault();
+                    Serial.println(F("[Rede] Cabo desconectado; usando o Wi-Fi"));
+                }
+                break;
+            default: break;
+        }
+    });
+    // Como no exemplo do fabricante, a porta cabeada so liga com o Wi-Fi (C6) ja de pe: ligar as duas
+    // juntas derrubava a ligacao com o C6. Tarefa propria para nao segurar o loop.
+    xTaskCreatePinnedToCore([](void*) {
+        const unsigned long t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        if (!ETH.begin(ETH_PHY_IP101, BREWW_ETH_PHY_ADDR, BREWW_ETH_MDC, BREWW_ETH_MDIO, BREWW_ETH_PHY_RST, EMAC_CLK_EXT_IN)) {
+            Serial.println(F("[Rede] Porta de rede cabeada nao iniciou"));
+        } else {
+            Serial.println(F("[Rede] Porta de rede cabeada pronta (com o cabo ligado e IP recebido, passa a ser a rede em uso)"));
+        }
+        vTaskDelete(NULL);
+    }, "eth_start", 4096, NULL, 1, NULL, 0);
+}
+bool net_eth_up() { return ethUp; }
+#else
+bool net_eth_up() { return false; }
+#endif
+
+bool net_online() { return net_eth_up() || WiFi.status() == WL_CONNECTED; }
+
+String net_hostname() {
+    String id = get_device_id();
+    id.toLowerCase();
+    return "breww-" + id.substring(id.length() > 4 ? id.length() - 4 : 0);
+}
+
+String net_local_ip() {
+#if defined(BREWW_HAS_ETH) && BREWW_HAS_ETH
+    if (ethUp) return ETH.localIP().toString();
+#endif
+    if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
+    return String();
+}
+
 void init_network() {
     Serial.println(F("Inicializando Módulo de Rede..."));
+    // Nome proprio na rede (antes era "breww" em todos: com dois aparelhos, o iSpindel caia no errado)
+#if defined(ESP8266)
+    WiFi.hostname(net_hostname());
+#else
+    WiFi.setHostname(net_hostname().c_str());
+#endif
+    Serial.printf_P(PSTR("[Rede] Nome na rede: %s.local\n"), net_hostname().c_str());
     
     // Inicia o driver Wi-Fi para evitar crash no server.begin()
     WiFi.mode(WIFI_STA);
+#if defined(BREWW_HAS_ETH) && BREWW_HAS_ETH
+    eth_begin();
+#endif
     // MDNS.begin("breww"); // Removido para nao conflitar com ArduinoOTA (igual ao codigo antigo!)
     
     // Fuso horario do Brasil (UTC-3). O SNTP so liga com o Wi-Fi conectado (ntp_loop).
@@ -712,8 +868,8 @@ void diag_report(const char* json) {
 }
 
 static void diag_flush() {
-    if (!diagCount || !mqttClient.connected()) return;
-    String mac = WiFi.macAddress();
+    if (!diagCount || !mqtt_online()) return;
+    String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
     mac.replace(":", "");
     String topic = "brewbrother/" + mac + "/diag";
     for (int sent = 0; sent < 2 && diagCount; sent++) { // no maximo 2 por volta do loop
@@ -728,7 +884,11 @@ static void diag_flush() {
 // 1 minuto, procura o mesmo nome de rede em todos os canais e, se houver um no pelo
 // menos 8 dB melhor, reconecta nele. No maximo uma tentativa a cada 10 minutos.
 // ---------------------------------------------------------------------------
+#ifdef BREWW_ROAM_WEAK_RSSI
+static const int ROAM_WEAK_RSSI = BREWW_ROAM_WEAK_RSSI; // limite proprio da placa (antena fraca)
+#else
 static const int ROAM_WEAK_RSSI = -72;
+#endif
 static const unsigned long ROAM_WEAK_MS = 60000;
 static const unsigned long ROAM_COOLDOWN_MS = 10UL * 60UL * 1000UL;
 static const int ROAM_MIN_GAIN_DB = 8;
@@ -744,7 +904,7 @@ static void wifi_roaming_check() {
 #else
     static unsigned long weakSince = 0, lastRoam = 0, lastSample = 0;
     static bool scanning = false;
-    if (isUpdatingOTA || WiFi.status() != WL_CONNECTED || savedSSID.length() == 0) { weakSince = 0; return; }
+    if (isUpdatingOTA || WiFi.status() != WL_CONNECTED || savedSSID.length() == 0 || net_eth_up()) { weakSince = 0; return; }
 
     if (scanning) {
         int n = WiFi.scanComplete();
@@ -801,7 +961,7 @@ static void wifi_roaming_check() {
 // Relogio (NTP). Travamento real (core dump da 2.9.7, placa com tela): o SNTP do lwIP resolvia
 // "pool.ntp.org" por DNS e o dns_enqueue criava um socket UDP sem o lock da pilha TCP/IP
 // (assert "Required to lock TCPIP core functionality" em udp_new -> abort). Agora o nome e
-// resolvido aqui, no loop, com WiFi.hostByName (seguro), e o SNTP recebe o IP: com IP o lwIP
+// resolvido aqui com WiFi.hostByName (seguro; no ESP32, na tarefa de fundo), e o SNTP recebe o IP: com IP o lwIP
 // nao passa pelo dns_enqueue. Liga so com o Wi-Fi conectado e renova o IP a cada 6 h.
 // ---------------------------------------------------------------------------
 static void ntp_loop() {
@@ -811,7 +971,7 @@ static void ntp_loop() {
     // SNTP em uso le nunca e reescrito)
     static char ipBuf[2][16] = {"", ""};
     static uint8_t cur = 0;
-    if (WiFi.status() != WL_CONNECTED) return;
+    if (!net_online()) return;
     const bool due = !configured || millis() - lastConfig > 6UL * 3600UL * 1000UL ||
                      (time(nullptr) < 1704067200 && millis() - lastConfig > 60000UL); // sem hora: tenta outro IP a cada 1 min
     if (!due) return;
@@ -820,7 +980,12 @@ static void ntp_loop() {
     static uint8_t next = 0;
     IPAddress ip;
     String chosen;
-    for (uint8_t k = 0; k < 3 && !chosen.length(); k++) {
+#if defined(ESP8266)
+    const uint8_t tries = 1; // no loop: no maximo uma espera de DNS por chamada
+#else
+    const uint8_t tries = 3; // na tarefa de fundo (sem DNS, cada nome espera alguns segundos)
+#endif
+    for (uint8_t k = 0; k < tries && !chosen.length(); k++) {
         const char* name = SERVERS[(next + k) % 3];
         if (WiFi.hostByName(name, ip) == 1 && ip != IPAddress((uint32_t)0)) chosen = ip.toString();
     }
@@ -881,7 +1046,7 @@ static void wifi_disc_report() {
         const bool known = node_rejected(b);
         node_reject(b);
         if (!known) Serial.printf_P(PSTR("[WiFi] No %02X:%02X:%02X:%02X:%02X:%02X recusou este aparelho: fica fora da escolha por 6 h\n"), b[0], b[1], b[2], b[3], b[4], b[5]);
-        if (WiFi.status() != WL_CONNECTED && savedSSID.length() && !isUpdatingOTA) wifi_begin_best(savedSSID.c_str(), savedPASS.c_str());
+        if (WiFi.status() != WL_CONNECTED && savedSSID.length() && !isUpdatingOTA) WIFI_RECONNECT_BEST();
     }
 #if defined(ESP8266)
     Serial.printf_P(PSTR("[WiFi] Desconectou (motivo %u)\n"), r);
@@ -898,10 +1063,12 @@ static void wifi_disc_report() {
 
 static void wifi_watchdog() {
     wifi_events_begin();
+    wifi_best_scan_poll(); // termina a busca em segundo plano, se houver
     wifi_disc_report();
     static unsigned long downSince = 0, lastKick = 0;
     if (WiFi.status() == WL_CONNECTED) { downSince = 0; roamPinnedAt = 0; return; }
-    if (isUpdatingOTA || savedSSID.length() == 0 || wifi_setup_connecting()) { downSince = 0; return; }
+    // Com o cabo em uso o Wi-Fi e so reserva: o driver tenta reconectar sozinho, sem derrubar nada
+    if (isUpdatingOTA || savedSSID.length() == 0 || wifi_setup_connecting() || net_eth_up()) { downSince = 0; return; }
     const unsigned long now = millis();
     if (!downSince) downSince = now;
     const bool roamFailed = roamPinnedAt && now - roamPinnedAt > 20000;
@@ -916,7 +1083,7 @@ static void wifi_watchdog() {
     roamPinnedAt = 0;
     lastKick = now;
     WiFi.disconnect();
-    wifi_begin_best(savedSSID.c_str(), savedPASS.c_str()); // melhor no que aceita (antes: o driver escolhia)
+    WIFI_RECONNECT_BEST(); // melhor no que aceita (antes: o driver escolhia)
 }
 
 // Perfil do ultimo handle_network (ms), lido pelo detector de travamento do loop
@@ -925,7 +1092,7 @@ unsigned long prof_ota = 0, prof_cloud = 0, prof_reconnect = 0, prof_mqttloop = 
 void handle_network() {
     prof_ota = prof_cloud = prof_reconnect = prof_mqttloop = prof_telemetry = prof_web = 0;
     wifi_watchdog();
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!net_online()) {
         ota_started = false;
         return; 
     }
@@ -935,7 +1102,7 @@ void handle_network() {
 #if !BREWW_LITE
     String otaCode;
     if (!ota_started && cloud_pair_code(otaCode)) {
-        ArduinoOTA.setHostname("breww");
+        ArduinoOTA.setHostname(net_hostname().c_str()); // tambem e o nome mDNS (breww-xxxx.local)
         ArduinoOTA.setPassword(otaCode.c_str());
         ArduinoOTA.onStart([]() {
             String type;
@@ -976,7 +1143,18 @@ void handle_network() {
     }
 #endif
     
+#if defined(ESP8266)
     ntp_loop();
+#else
+    // Relogio na tarefa de fundo: sem internet (roteador religando), o DNS dos 3 servidores segurava o
+    // loop ~21 s (22/11, depois de faltar energia). O ntp_loop so e chamado de la; aqui so a cada 10 s.
+    static unsigned long lastNtpTick = 0;
+    if (!lastNtpTick || millis() - lastNtpTick > 10000) {
+        const int bg = cloud_bg_submit(ntp_loop);
+        if (bg != 0) lastNtpTick = millis(); // 0 = tarefa ocupada: tenta na proxima volta
+        if (bg < 0) ntp_loop();               // sem tarefa de fundo: no loop, como antes
+    }
+#endif
     wifi_roaming_check();
     unsigned long tp = millis();
 #if !BREWW_LITE
@@ -988,39 +1166,68 @@ void handle_network() {
 #if defined(ESP8266)
     // Uma operacao TLS por volta do loop: o anuncio HTTPS acabou de rodar (segundos); a reconexao do MQTT
     // fica para a proxima volta (o vigia e alimentado ao sair do loop)
-    if (prof_cloud > 1000 && !mqttClient.connected()) { server.handleClient(); return; }
+    if (prof_cloud > 1000 && !mqtt_online()) { server.handleClient(); return; }
 #endif
 
     static unsigned long mqttDownSince = 0;
     static int mqttAttempts = 0;
+    static int mqttStateBefore = 0;
+    static unsigned long mqttRetryMs = 5000; // 5 s, dobra a cada falha ate 60 s (servidor fora do ar)
     static bool bootReported = false;
-    if (!mqttClient.connected()) {
-        long now = millis();
-        if (!mqttDownSince) mqttDownSince = millis();
-        if (now - lastMqttReconnectAttempt > 5000) {
-            lastMqttReconnectAttempt = now;
-            tp = millis();
-            Serial.println(F("[MQTT] Conexao perdida, reconectando..."));
-            mqttAttempts++;
-            int stBefore = mqttClient.state();
-            if (reconnectMqtt()) {
-                lastMqttReconnectAttempt = 0;
-                char ev[200];
-                if (!bootReported) {
-                    bootReported = true;
-                    snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u,\"otaTest\":%d,\"otaRolledBack\":%d}"),
-                             plat_reset_reason(), FW_VERSION, millis(),
-                             (unsigned)plat_free_heap(),
-                             ota_guard_pending() ? 1 : 0, ota_guard_rolled_back_once() ? 1 : 0);
-                } else {
-                    snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"mqtt_reconnect\",\"ms\":%lu,\"down\":%lu,\"attempts\":%d,\"state\":%d,\"rssi\":%d}"),
-                             millis() - tp, millis() - mqttDownSince, mqttAttempts, stBefore, (int)WiFi.RSSI());
-                }
-                diag_report(ev);
-                mqttDownSince = 0;
-                mqttAttempts = 0;
+
+    // Resultado da ultima tentativa (da tarefa de fundo ou do loop)
+    if (mqttJobDone.exchange(false)) {
+        if (mqttJobOk) {
+            Serial.printf_P(PSTR("MQTT Conectado! (credencial propria, TLS 8883, %lu ms)\n"), mqttJobMs);
+            char ev[200];
+            if (!bootReported) {
+                bootReported = true;
+                snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"boot\",\"reason\":\"%s\",\"fw\":\"%s\",\"ms\":%lu,\"heap\":%u,\"otaTest\":%d,\"otaRolledBack\":%d}"),
+                         plat_reset_reason(), FW_VERSION, millis(),
+                         (unsigned)plat_free_heap(),
+                         ota_guard_pending() ? 1 : 0, ota_guard_rolled_back_once() ? 1 : 0);
+            } else {
+                snprintf_P(ev, sizeof(ev), PSTR("{\"type\":\"mqtt_reconnect\",\"ms\":%lu,\"down\":%lu,\"attempts\":%d,\"state\":%d,\"rssi\":%d}"),
+                         mqttJobMs, millis() - mqttDownSince, mqttAttempts, mqttStateBefore, (int)WiFi.RSSI());
             }
-            prof_reconnect = millis() - tp;
+            diag_report(ev);
+            mqttDownSince = 0;
+            mqttAttempts = 0;
+            mqttRetryMs = 5000;
+            lastMqttReconnectAttempt = 0;
+        } else {
+            Serial.printf_P(PSTR("MQTT falhou (state %d, TLS 8883, %lu ms); proxima tentativa em %lu s\n"),
+                            mqttJobState, mqttJobMs, mqttRetryMs / 1000);
+            if (mqttJobTlsErr[0]) Serial.printf_P(PSTR("[MQTT] TLS: %s\n"), mqttJobTlsErr);
+            // 4 = usuario/senha invalidos, 5 = nao autorizado
+            if (mqttJobState == MQTT_CONNECT_BAD_CREDENTIALS || mqttJobState == MQTT_CONNECT_UNAUTHORIZED) {
+                cloud_mqtt_credentials_rejected();
+            }
+            if (mqttRetryMs < 60000) mqttRetryMs = mqttRetryMs * 2 > 60000 ? 60000 : mqttRetryMs * 2;
+        }
+    }
+
+    if (!mqtt_online()) {
+        const unsigned long now = millis();
+        if (!mqttDownSince) mqttDownSince = now;
+        if (!mqttJobBusy.load() && now - lastMqttReconnectAttempt > mqttRetryMs) {
+            lastMqttReconnectAttempt = now;
+            if (mqtt_prepare()) {
+                Serial.println(F("[MQTT] Conexao perdida, reconectando..."));
+                mqttAttempts++;
+                mqttStateBefore = mqttClient.state();
+                mqttJobBusy.store(true);
+                const int bg = cloud_bg_submit(mqtt_connect_job);
+                if (bg == 0) {
+                    mqttJobBusy.store(false); // tarefa ocupada (ex.: relogio): tenta de novo em 1 s
+                    lastMqttReconnectAttempt = now - mqttRetryMs + 1000;
+                    mqttAttempts--;
+                } else if (bg < 0) {
+                    tp = millis();
+                    mqtt_connect_job(); // sem tarefa de fundo (ESP8266): no loop, como antes
+                    prof_reconnect = millis() - tp;
+                }
+            }
         }
     } else {
         tp = millis();
@@ -1038,15 +1245,15 @@ void handle_network() {
         bool needsReport = false;
         // Só permite enviar por evento se já passou pelo menos 2 segundos desde o último envio
         if (millis() - lastTelemetry > 2000) {
-            if (abs(currentTemp - lastReportedTemp1) >= 0.1) needsReport = true;
-            if (abs(currentTemp2 - lastReportedTemp2) >= 0.1) needsReport = true;
+            if (abs(sensor_temp_or0(0) - lastReportedTemp1) >= 0.1) needsReport = true;
+            if (abs(sensor_temp_or0(1) - lastReportedTemp2) >= 0.1) needsReport = true;
             if (isHeaterOn != lastReportedHeater) needsReport = true;
             if (isCoolerOn != lastReportedCooler) needsReport = true;
         }
         
         if (needsReport || millis() - lastTelemetry > 3000) {
-            lastReportedTemp1 = currentTemp;
-            lastReportedTemp2 = currentTemp2;
+            lastReportedTemp1 = sensor_temp_or0(0);
+            lastReportedTemp2 = sensor_temp_or0(1);
             lastReportedHeater = isHeaterOn;
             lastReportedCooler = isCoolerOn;
             lastTelemetry = millis();
@@ -1083,14 +1290,15 @@ static void hardware_modules_json(char* out, size_t n) {
 }
 
 void mqtt_publish_device_action(const char* json) {
-    if (!mqttClient.connected()) return;
-    String mac = WiFi.macAddress();
+    if (!mqtt_online()) return;
+    String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
     mac.replace(":", "");
     mqttClient.publish(("brewbrother/" + mac + "/device_action").c_str(), json);
 }
 
 void mqtt_publish_telemetry() {
-    String mac = WiFi.macAddress();
+    if (!mqtt_online()) return; // chamada tambem pela tela/botoes/ajustes, com ou sem conexao
+    String mac = get_device_id(); // mesma identidade do pareamento (no P4 nao e o MAC do Wi-Fi)
     mac.replace(":", "");
     String topic = "brewbrother/" + mac + "/data";
     
@@ -1154,16 +1362,16 @@ void mqtt_publish_telemetry() {
         snprintf_P(sens + n, sizeof(sens) - n, PSTR("], \"ctl\":%d, \"ctlMap\":[%d,%d,%d], "), control_slot(), ctlMap[0], ctlMap[1], ctlMap[2]);
     }
     static char payload[1960]; // estatico: fora da pilha do loop
-    snprintf_P(payload, sizeof(payload), PSTR("{%s\"ferm\":%.2f, \"amb\":%.2f, \"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}"),
-             sens, currentTemp, currentTemp2, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
+    snprintf_P(payload, sizeof(payload), PSTR("{%s\"csp\":%.2f, \"opm\":%d, \"is_sg\":%.3f, \"is_bat\":%.2f, \"is_epc\":%lu, \"statOp\":\"%s\", \"rssi\":%ld, \"net\":\"%s\", \"fermRun\":%d, %s\"ts\":%lu, \"c_n1\":\"%s\", \"c_n3\":\"%s\", \"c_ibu\":%d, \"c_vol\":%.1f, \"ext_s\":{\"hum\":%s}, \"macCtrl\":\"%s\", \"mac2\":\"%s\", \"fw\":\"%s\", \"board\":\"%s\", \"relInv\":%d, \"sensOk\":%d, \"mods\":%s, \"pins\":%s%s}"),
+             sens, currentSetpoint, currentMode, ispindelGravity, ispindelBattery, ispEpoch,
              (isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado")),
-             (long)WiFi.RSSI(), (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
+             (long)WiFi.RSSI(), net_eth_up() ? "cabo" : "wifi", (isRampActive && !isRampPaused) ? 1 : 0, profile, (unsigned long)time(NULL),
              beerName.c_str(), beerType.c_str(), beerIBU, beerABV, humStr, sensorMacCtrl.c_str(), sensorMac2.c_str(), FW_VERSION, BREWW_BOARD_NAME,
              (relay_heater_inverted() ? 1 : 0) | (relay_cooler_inverted() ? 2 : 0), // bit0 aquecer, bit1 resfriar
              control_sensor_ok() ? 1 : 0, // 0 = sem leitura do sensor de controle (reles desligados)
              mods, pinsJson, pinsErr);
 
-    if (!mqttClient.publish(topic.c_str(), payload, true) && mqttClient.connected()) {
+    if (!mqttClient.publish(topic.c_str(), payload, true) && mqtt_online()) {
         // Envio falhou com a conexao "aberta": provavelmente travada. Forca reconexao ja.
         static int publishFailures = 0;
         if (++publishFailures >= 2) {

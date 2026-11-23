@@ -35,9 +35,12 @@ jobs:
           - board: esp8266-lite
             flag: ESP8266_LITE
             fqbn: esp8266:esp8266:nodemcuv2:eesz=4M1M,xtal=160
+          - board: p4-7
+            flag: P4_7
+            fqbn: esp32:esp32:esp32p4:ChipVariant=prev3,PSRAM=enabled,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,USBMode=hwcdc,CDCOnBoot=cdc
     name: ${{ matrix.board }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: breww_controller # pasta precisa ter o mesmo nome do .ino
 
@@ -60,6 +63,8 @@ jobs:
             "PubSubClient@2.8" "OneWire@2.3.8" "DallasTemperature@4.0.6" "DHT sensor library@1.4.7" \
             "Adafruit Unified Sensor@1.1.15" "AutoPID@1.0.3" "U8g2@2.36.19"
           cp breww_controller/ci/lv_conf.h "$HOME/Arduino/libraries/lv_conf.h"
+          # OneWire 2.3.8 nao conhece o ESP32-P4 (placa p4-7)
+          if [ -f breww_controller/ci/patch_onewire_p4.py ]; then python3 breww_controller/ci/patch_onewire_p4.py "$HOME/Arduino/libraries/OneWire"; fi
 
       - name: Compilar ${{ matrix.board }}
         env:

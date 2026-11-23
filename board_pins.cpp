@@ -42,6 +42,14 @@ static bool pin_exists_and_free(int p, bool output, String& why) {
     if (p == 1 || p == 3) { why = "e da serial (USB)"; return false; }
     if (p == 16 && !output) { why = "nao tem pull-up interno"; return false; }
     (void)output;
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+    // Placa de 7" (Guition JC1060P470C): quase todo pino do P4 tem dono (C6 do Wi-Fi em 6 e 14-19/54,
+    // tela, touch, audio, cartao, rede cabeada). So os pinos livres do conector, pelo esquema.
+    (void)output;
+    static const int8_t FREE[] = {1, 2, 3, 4, 32, 33, 46, 47};
+    bool free = false;
+    for (size_t i = 0; i < sizeof(FREE); i++) if (FREE[i] == p) free = true;
+    if (!free) { why = "nao esta livre nesta placa (use 1, 2, 3, 4, 32, 33, 46 ou 47)"; return false; }
 #else // ESP32 classico
     if (p < 0 || p > 39 || p == 20 || p == 24 || (p >= 28 && p <= 31)) { why = "nao existe no ESP32"; return false; }
     if (p >= 6 && p <= 11) { why = "e da memoria flash"; return false; }
@@ -60,6 +68,8 @@ static bool is_strapping(int p) {
     return p == 0 || p == 3 || p == 45 || p == 46;
 #elif defined(CONFIG_IDF_TARGET_ESP32C3)
     return p == 2 || p == 8 || p == 9;
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+    return p >= 34 && p <= 38;
 #elif defined(ESP8266)
     return p == 0 || p == 2 || p == 15 || p == 16; // 16 pulsa no reset (rele estalaria)
 #else

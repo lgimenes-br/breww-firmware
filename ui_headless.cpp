@@ -51,7 +51,7 @@ static void led_update() {
     if (otaActive) on = (t / 100) % 2 == 0;
     else if (pairPending) { unsigned long p = t % 1000; on = p < 120 || (p >= 240 && p < 360); }
     else if (WiFi.status() != WL_CONNECTED) on = (t / 1000) % 2 == 0;
-    else if (!mqttClient.connected()) on = (t % 2000) < 100;
+    else if (!mqtt_online()) on = (t % 2000) < 100;
     else on = true;
     led_write(on);
 }
@@ -91,9 +91,9 @@ static void print_help() {
 static void print_status() {
     String code;
     Serial.printf_P(PSTR("[Status] placa %s | modo %d | temp %.2f / alvo %.2f | Wi-Fi %s (%s) | nuvem %s\n"),
-                  BREWW_BOARD_NAME, currentMode, currentTemp, currentSetpoint,
+                  BREWW_BOARD_NAME, currentMode, control_temp(), currentSetpoint,
                   WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado",
-                  WiFi.SSID().c_str(), mqttClient.connected() ? "conectada" : "desconectada");
+                  WiFi.SSID().c_str(), mqtt_online() ? "conectada" : "desconectada");
     if (cloud_pair_code(code)) Serial.printf_P(PSTR("[Status] codigo de confirmacao: %s (ID %s)\n"), code.c_str(), get_device_id().c_str());
     // Diagnostico da instalacao (o assistente do site guarda estas linhas no log)
     if (WiFi.status() == WL_CONNECTED)
@@ -227,13 +227,13 @@ static void display_update() {
     else if (currentMode == MODE_CHOPP)
         snprintf_P(footer, sizeof(footer), PSTR("%s"), beerName.c_str());
     else {
-        // Leituras extras (a conexao ja aparece no canto: OFFLINE / WI-FI / NUVEM): o outro sensor (cerveja
-        // ou ar), a umidade e a densidade do iSpindel recente. Sem nenhuma: a versao (ajuda no suporte).
+        // Leituras extras (a conexao ja aparece no canto: OFFLINE / WI-FI / NUVEM): o outro sensor (S1/S2),
+        // a umidade e a densidade do iSpindel recente. Sem nenhuma: a versao (ajuda no suporte).
         size_t n = 0;
         footer[0] = 0;
         const int other = control_slot() ^ 1;
         if (sensor_fresh(other))
-            n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("%s %.1f°C"), other == 0 ? "Cerveja" : "Ar", other == 0 ? currentTemp : currentTemp2);
+            n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("S%d %.1f°C"), other + 1, sensorTemps[other]);
         if (!isnan(currentHumidity) && n < sizeof(footer) - 6)
             n += snprintf_P(footer + n, sizeof(footer) - n, PSTR("%s%.0f%%"), n ? "  " : "", currentHumidity);
         const bool spFresh = lastIspindelUpdate && millis() - lastIspindelUpdate < 2UL * 3600UL * 1000UL;
@@ -250,7 +250,7 @@ static void display_update() {
     st.setpoint = currentSetpoint;
     st.relay = !sensOk ? "Sem sensor" : isHeaterOn ? "Aquecendo" : (isCoolerOn ? "Resfriando" : "Desligado");
     st.wifi = WiFi.status() == WL_CONNECTED;
-    st.cloud = mqttClient.connected();
+    st.cloud = mqtt_online();
     st.footer = footer;
     st.pairCode = pairCode.length() ? pairCode.c_str() : nullptr;
     st.pairPending = pairPending;

@@ -33,6 +33,8 @@ bool cloud_pair_code(String& out);
 bool cloud_mqtt_credentials(String& user, String& pass);
 // Chamado quando o broker recusa a credencial propria (ex: servidor perdeu o registro)
 void cloud_mqtt_credentials_rejected();
+// Aparelho ja vinculado (o servidor criou a credencial MQTT propria)
+bool cloud_is_paired();
 
 // Atualizacao OTA segura: so aceita URLs https://breww.live/, valida o certificado
 // (raizes ISRG) e o servidor manda o MD5 no header x-MD5, conferido antes de ativar.
@@ -40,6 +42,10 @@ void cloud_mqtt_credentials_rejected();
 bool cloud_ota_update(const String& url, void (*onProgress)(int current, int total), String* errorOut = nullptr);
 // Pausa o HTTPS de fundo (anuncio/pareamento) durante a OTA
 void cloud_pause_background(bool paused);
+
+// Roda job() uma vez na tarefa de fundo (ESP32), fora do loop. 1 = aceito, 0 = outro trabalho em
+// andamento (tente depois), -1 = sem tarefa de fundo (ESP8266 ou sem RAM): o chamador roda no loop.
+int cloud_bg_submit(void (*job)());
 
 // Estado da conversa com a nuvem, em uma frase curta (comando "status" e log da instalacao)
 const char* cloud_status_text();

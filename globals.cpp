@@ -3,8 +3,6 @@
 #include "globals.h"
 
 // Inicializacao das variaveis globais
-float currentTemp = 0.0;
-float currentTemp2 = 0.0;
 float currentHumidity = NAN; // NAN = sem leitura valida do DHT22 (publicado como null)
 float currentSetpoint = 18.0;
 float finalGravity = 1.010;

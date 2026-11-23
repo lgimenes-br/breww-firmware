@@ -1,1 +1,7 @@
 build/
+.impeccable/prototype/
+
+# Bancada de testes
+tools/bancada/.venv/
+tools/bancada/build/
+tools/bancada/relatorios/

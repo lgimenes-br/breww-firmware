@@ -36,6 +36,8 @@ bool sensor_fresh(int slot);
 // geladeira/chopp pelo Sensor 2 (sem ele, pelo 1: placa com um sensor so funciona em qualquer modo).
 int control_slot();
 float control_temp();
+/** Temperatura do Sensor N (slot 0..3) ou 0,0 sem leitura (para comparar mudancas na telemetria) */
+float sensor_temp_or0(int slot);
 bool control_sensor_ok();
 const unsigned long SENSOR_STALE_MS = 15000;
 

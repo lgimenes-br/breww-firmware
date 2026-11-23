@@ -6,6 +6,10 @@
 
 // Instancias do OneWire e DallasTemperature (pinos vem de board_pins, carregados no boot)
 OneWire oneWire;
+// Pull-up interno na linha 1-Wire: sem sensor (e sem o resistor de 4,7k da placa), a linha flutuava em
+// nivel baixo, parecia "sensor respondendo" e a busca travava ~200 ms a cada segundo (placa de 7").
+// Com o resistor externo ligado, o interno so fica em paralelo e nao atrapalha.
+static void onewire_pullup(int pin) { if (pin >= 0) pinMode(pin, INPUT_PULLUP); }
 DallasTemperature sensors(&oneWire);
 static DHT* dht = nullptr; // criado no init_sensors (sem DHT configurado = nullptr)
 
@@ -14,7 +18,7 @@ unsigned long lastTempRequest = 0;
 // ---------------------------------------------------------------------------
 // Sensores numerados (fw 2.11): ate 4 DS18B20, Sensor 1..4 (slot 0..3), cada um preso ao MAC.
 // O nome ("Cerveja", "Geladeira"...) e so rotulo no app; qual sensor CONTROLA cada modo e uma
-// escolha separada (ctlMap). Compatibilidade: slot 0 = "ferm"/currentTemp, slot 1 = "amb"/currentTemp2.
+// escolha separada (ctlMap). Na telemetria: lista "t" (Sensor 1..4, null = sem leitura) e "ctl".
 // Sem mapeamento salvo, usa a ordem do barramento.
 // ---------------------------------------------------------------------------
 #define MAX_DS18B20 5
@@ -97,9 +101,6 @@ void set_sensor_slots(const String macs[SENSOR_SLOTS]) {
     p.remove("mac_2");
     p.end();
 
-    // Reinicia a media movel para nao misturar leituras de sensores diferentes
-    currentTemp = 0.0;
-    currentTemp2 = 0.0;
     mappingDirty = true;
     Serial.printf_P(PSTR("[Sensores] Mapeamento salvo: S1 %s | S2 %s | S3 %s | S4 %s\n"),
                   sensorMacs[0].length() ? sensorMacs[0].c_str() : "(auto)", sensorMacs[1].length() ? sensorMacs[1].c_str() : "(auto)",
@@ -161,6 +162,7 @@ unsigned long dhtFailCount = 0;
 void init_sensors() {
     Serial.println(F("Inicializando barramento de sensores 1-Wire..."));
     oneWire.begin(g_pins.oneWire);
+    onewire_pullup(g_pins.oneWire);
     pinMode(g_pins.oneWire, INPUT_PULLUP);
     sensors.begin();
     // Acelera a leitura (resolucao de 12 bits eh mais estavel e o delay assincrono compensa)
@@ -255,6 +257,7 @@ static bool probe_dht22(int pin) {
 static void use_onewire_pin(int p) {
     g_pins.oneWire = p;
     oneWire.begin(p);
+    onewire_pullup(p);
     pinMode(p, INPUT_PULLUP);
     sensors.begin();
     sensors.setResolution(12);
@@ -327,7 +330,13 @@ void read_temperatures() {
     }
     if (millis() - lastTempRequest >= 1000) {
         // Tenta achar o sensor novamente caso tenha sido plugado com a placa ja ligada
-        if(sensors.getDeviceCount() == 0) {
+        // Sem sensor no barramento, sensors.begin() levava ~200 ms toda vez (travava o touch a cada 1 s).
+        // Um reset do 1-Wire (~1 ms) diz se ha alguem respondendo; so entao enumera. Linha sem o resistor
+        // de 4,7k (placa de 7" sem sensor ligado) pode parecer "respondendo": por isso tambem o intervalo.
+        // Sem resposta, tenta de novo so a cada 15 s (hot-plug continua funcionando)
+        static unsigned long lastEnum = 0;
+        if(sensors.getDeviceCount() == 0 && (lastEnum == 0 || millis() - lastEnum >= 15000UL) && oneWire.reset()) {
+            lastEnum = millis();
             sensors.begin();
         }
         
@@ -365,9 +374,6 @@ void read_temperatures() {
         
         // Sem leitura recente, o slot volta a "sem valor" (o app mostra --)
         for (int k = 0; k < SENSOR_SLOTS; k++) if (!sensor_fresh(k)) sensorTemps[k] = NAN;
-        // Compatibilidade: telas e telemetria antigas leem os dois primeiros
-        currentTemp = isnan(sensorTemps[0]) ? 0.0f : sensorTemps[0];
-        currentTemp2 = isnan(sensorTemps[1]) ? 0.0f : sensorTemps[1];
 
         // Print serial a cada 5 segs para n flodar
         static unsigned long lastPrint = 0;
@@ -446,3 +452,8 @@ float control_temp() { const int s = control_slot(); return isnan(sensorTemps[s]
 bool control_sensor_ok() { return sensor_fresh(control_slot()); }
 
 int ds18b20_count() { return cachedDeviceCount < 0 ? 0 : cachedDeviceCount; }
+
+float sensor_temp_or0(int slot) {
+    if (slot < 0 || slot >= SENSOR_SLOTS || isnan(sensorTemps[slot])) return 0.0f;
+    return sensorTemps[slot];
+}

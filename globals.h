@@ -14,8 +14,6 @@ enum OperationMode {
 };
 
 // Variaveis de Estado (declaradas externamente)
-extern float currentTemp;
-extern float currentTemp2;
 extern float currentHumidity;
 extern float currentSetpoint;
 extern float finalGravity;

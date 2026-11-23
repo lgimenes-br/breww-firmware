@@ -14,6 +14,8 @@
     #include "boards/board_s3_headless.h"
 #elif defined(BREWW_BOARD_C3_HEADLESS)
     #include "boards/board_c3_headless.h"
+#elif defined(BREWW_BOARD_P4_7)
+    #include "boards/board_p4_7.h"
 #elif defined(BREWW_BOARD_ESP8266_LITE) || defined(ESP8266)
     #include "boards/board_esp8266_lite.h"
 #else

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Breww
 #include "cloud_pairing.h"
+#include "net_manager.h" // net_online / net_local_ip (Wi-Fi ou cabo)
 #include "platform.h"
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
@@ -28,7 +29,11 @@ static const unsigned long ANNOUNCE_INTERVAL_MS = 5UL * 60UL * 1000UL;
 static const unsigned long ANNOUNCE_RETRY_MS = 30UL * 1000UL;
 // Sem vinculo ainda nao ha MQTT para "acordar" o aparelho: anuncia mais vezes para o pedido
 // de vinculo aparecer na tela em segundos
-static const unsigned long ANNOUNCE_UNBOUND_MS = 10UL * 1000UL;
+#if BREWW_LITE
+static const unsigned long ANNOUNCE_UNBOUND_MS = 10UL * 1000UL; // ESP8266: cada TLS trava o loop 1-3 s
+#else
+static const unsigned long ANNOUNCE_UNBOUND_MS = 5UL * 1000UL;  // vinculo em ~5 s; 180 anuncios/15 min, abaixo do limite de 300 por IP do servidor
+#endif
 // Chave recusada (aparelho resetado): continua tentando, para o dono poder trocar a chave
 static const unsigned long ANNOUNCE_REJECTED_MS = 60UL * 1000UL;
 
@@ -180,6 +185,10 @@ String get_device_id() {
     uint8_t mac[6];
 #if defined(ESP8266)
     WiFi.macAddress(mac);
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+    // O P4 nao tem radio proprio (o Wi-Fi e do C6): a identidade vem do MAC de fabrica gravado no P4,
+    // fixo e disponivel antes do Wi-Fi subir. (esp_read_mac(WIFI_STA) falha nele.)
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) memset(mac, 0, sizeof(mac));
 #else
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 #endif
@@ -264,6 +273,8 @@ bool cloud_pair_code(String& out) {
     out.toUpperCase();
     return true;
 }
+
+bool cloud_is_paired() { return load_mqtt_flag(); }
 
 bool cloud_mqtt_credentials(String& user, String& pass) {
     if (!load_mqtt_flag() || get_device_key().length() != 64) return false;
@@ -386,7 +397,7 @@ static void cloud_work() {
         if (doRespond || doAnnounce) {
             // RAM para uma conexao TLS so: o MQTT sai enquanto o HTTPS roda (o loop reconecta depois)
             extern PubSubClient mqttClient;
-            if (mqttClient.connected()) { Serial.println(F("[Cloud] Lite: pausando o MQTT durante o HTTPS")); mqttClient.disconnect(); }
+            if (mqtt_online()) { Serial.println(F("[Cloud] Lite: pausando o MQTT durante o HTTPS")); mqttClient.disconnect(); }
         }
 #endif
         if (doRespond) {
@@ -422,9 +433,17 @@ static void cloud_work() {
 }
 
 #if !defined(ESP8266)
+// Um trabalho avulso por vez para a tarefa de fundo (conexao ao broker, relogio): o que pode
+// levar segundos sem rede nao roda no loop, que segue lendo sensores, controlando e desenhando.
+static std::atomic<void (*)()> bgJob{nullptr};
+
 static void cloud_task_fn(void*) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        if (void (*job)() = bgJob.load()) {
+            job();
+            bgJob.store(nullptr);
+        }
         cloud_work();
     }
 }
@@ -455,6 +474,19 @@ static bool ensure_cloud_task() {
     }
     Serial.printf_P(PSTR("[Cloud] Tarefa de rede pronta (pilha na %s).\n"), heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "RAM interna");
     return true;
+#endif
+}
+
+int cloud_bg_submit(void (*job)()) {
+#if defined(ESP8266)
+    (void)job;
+    return -1;
+#else
+    if (!ensure_cloud_task()) return -1;
+    void (*expected)() = nullptr;
+    if (!bgJob.compare_exchange_strong(expected, job)) return 0; // outro trabalho em andamento
+    xTaskNotifyGive(cloudTask);
+    return 1;
 #endif
 }
 
@@ -594,7 +626,7 @@ static bool lastAnnounceBound = false;
 const char* cloud_status_text() {
     static char buf[64];
     if (cloudTaskFailed) return "erro: sem memoria para a tarefa de rede";
-    if (WiFi.status() != WL_CONNECTED) return "sem Wi-Fi";
+    if (!net_online()) return "sem rede";
     if (time(nullptr) < 1704067200) return "aguardando o relogio (NTP)";
     if (keyRejected) return "chave recusada (vincule de novo com o codigo)";
     if (announceInFlight && !lastAnnounceCode) return "anunciando ao servidor";
@@ -652,7 +684,7 @@ void cloud_pairing_loop() {
                 save_mqtt_flag(true);
                 Serial.println(F("[Cloud] Credencial MQTT propria pronta; reconectando ao broker com ela."));
                 extern PubSubClient mqttClient;
-                mqttClient.disconnect(); // o loop reconecta ja com usuario/senha do aparelho
+                if (mqtt_online()) mqttClient.disconnect(); // o loop reconecta ja com usuario/senha do aparelho
             }
             if (!hasPairing) {
                 if (currentPairingId.length()) { ui_hide_pair_confirm(); currentPairingId = ""; }
@@ -700,14 +732,14 @@ void cloud_pairing_loop() {
     // conectado, so anuncia quando o servidor pede (pair_request) ou se o MQTT cair.
     {
         extern PubSubClient mqttClient;
-        if (!checkRequested && mqttClient.connected() && (long)(now - nextAnnounceAt) >= 0) { nextAnnounceAt = now + ANNOUNCE_INTERVAL_MS; return; }
+        if (!checkRequested && mqtt_online() && (long)(now - nextAnnounceAt) >= 0) { nextAnnounceAt = now + ANNOUNCE_INTERVAL_MS; return; }
     }
 #endif
     if (checkRequested || (long)(now - nextAnnounceAt) >= 0) {
         checkRequested = false;
         announceInFlight = true;
         CLOUD_LOCK();
-        reqAnnounce = true; reqLocalIp = WiFi.localIP().toString();
+        reqAnnounce = true; reqLocalIp = net_local_ip();
         CLOUD_UNLOCK();
         CLOUD_KICK();
     }

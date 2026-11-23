@@ -1,0 +1,8 @@
+# Acoes do GitHub fixadas pelo commit exato (protege contra uma acao de terceiros trocada por versao
+# maliciosa). O Dependabot abre um pedido por mes quando houver versao nova, ja com o commit novo.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

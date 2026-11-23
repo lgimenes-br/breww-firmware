@@ -146,6 +146,8 @@ inline const char* plat_chip_family() {
     return "ESP32-S3";
 #elif defined(CONFIG_IDF_TARGET_ESP32C3)
     return "ESP32-C3";
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+    return "ESP32-P4";
 #else
     return "ESP32";
 #endif
